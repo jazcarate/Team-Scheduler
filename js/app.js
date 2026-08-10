@@ -42,6 +42,7 @@ function loadFromStorage() {
 (function () {
   const inputEl   = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
   const vizEl     = /** @type {HTMLElement} */ (document.getElementById('viz-wrap'));
+  const infoBarEl = /** @type {HTMLElement} */ (document.getElementById('info-bar'));
   const btnSolve  = /** @type {HTMLButtonElement} */ (document.getElementById('btn-solve'));
   const btnReset  = /** @type {HTMLButtonElement} */ (document.getElementById('btn-reset'));
   const btnUndo   = /** @type {HTMLButtonElement} */ (document.getElementById('btn-undo'));
@@ -156,10 +157,6 @@ function loadFromStorage() {
   vizEl.addEventListener('dragstart', e => {
     const card = /** @type {HTMLElement} */ (e.target).closest('[data-person]');
     if (!card) return;
-    // Hide tooltip before browser snapshots the drag ghost, restore after
-    const tt = card.querySelector('.tt');
-    if (tt) tt.style.display = 'none';
-    requestAnimationFrame(() => { if (tt) tt.style.display = ''; });
     const person = card.dataset.person;
     e.dataTransfer.setData('text/plain', person);
     e.dataTransfer.effectAllowed = 'move';
@@ -168,6 +165,20 @@ function loadFromStorage() {
 
   document.addEventListener('dragend', () => {
     clearDragHighlights();
+  });
+
+  // ── Info bar ───────────────────────────────────────────────────
+  vizEl.addEventListener('mouseover', e => {
+    const card = /** @type {HTMLElement} */ (e.target).closest('[data-person]');
+    if (!card || !currentParsed || !currentAssignment) return;
+    showInfoBar(card.dataset.person);
+  });
+
+  vizEl.addEventListener('mouseout', e => {
+    const card = /** @type {HTMLElement} */ (e.target).closest('[data-person]');
+    const to   = /** @type {HTMLElement} */ (e.relatedTarget);
+    if (!card) return;
+    if (!to || !card.contains(to)) hideInfoBar();
   });
 
   vizEl.addEventListener('dragover', e => {
@@ -302,6 +313,58 @@ function loadFromStorage() {
     vizEl.querySelectorAll(HL_CLASSES.map(c => `.${c}`).join(',')).forEach(el =>
       el.classList.remove(...HL_CLASSES));
     vizEl.querySelectorAll('[data-drag-badge]').forEach(el => el.remove());
+  }
+
+  // ── Info bar ───────────────────────────────────────────────────
+  function showInfoBar(person) {
+    const { nodes, springs } = currentParsed;
+    const myArea   = currentAssignment[person];
+    const relevant = springs.filter(s => s.from === person);
+    const isPinned = person in currentPins;
+
+    let html = `<span class="ib-name">${escHtml(person)}</span>`;
+    if (isPinned) html += `<span class="ib-pinned">pinned</span>`;
+
+    if (!relevant.length) {
+      html += `<span class="ib-none">no preferences</span>`;
+    } else {
+      for (const s of relevant) {
+        const isArea = nodes[s.to] && !nodes[s.to].mobile;
+        let cls, label;
+        if (isArea) {
+          const sat = s.force > 0
+            ? (!!myArea && isInOrUnder(myArea, s.to, nodes))
+            : (!!myArea && !isInOrUnder(myArea, s.to, nodes));
+          cls   = sat ? 'ok' : 'bad';
+          label = `${s.verb} ${s.to}`;
+        } else {
+          const toArea = currentAssignment[s.to];
+          if (s.force > 0) {
+            const cl = (myArea && toArea) ? closeness(myArea, toArea, nodes) : 0;
+            if      (cl >= 1) { cls = 'ok';      label = `${s.verb} ${s.to}`; }
+            else if (cl >  0) {
+              const lca = lcaPath(myArea, toArea, nodes);
+              cls   = 'partial';
+              label = `${s.verb} ${s.to}` + (lca ? ` via ${lca}` : '');
+            }
+            else              { cls = 'bad';     label = `${s.verb} ${s.to}`; }
+          } else {
+            cls   = (toArea !== myArea) ? 'ok' : 'bad';
+            label = `${s.verb} ${s.to}`;
+          }
+        }
+        const tick = cls === 'ok' ? '✓' : cls === 'partial' ? '~' : '✗';
+        const comment = s.comment ? ` · ${s.comment}` : '';
+        html += `<span class="ib-chip ${cls}">${tick} ${escHtml(label + comment)}</span>`;
+      }
+    }
+
+    infoBarEl.innerHTML = html;
+    infoBarEl.classList.add('active');
+  }
+
+  function hideInfoBar() {
+    infoBarEl.classList.remove('active');
   }
 
   // ── Core ───────────────────────────────────────────────────────

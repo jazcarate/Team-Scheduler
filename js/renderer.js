@@ -13,45 +13,6 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function buildTooltipHtml(name, springs, nodes, assignment, isPinned) {
-  const pinRow = isPinned ? '<div class="tt-row pinned-note">Manually placed</div>' : '';
-  const relevant = springs.filter(s => s.from === name);
-  if (!relevant.length) return pinRow + `<div class="tt-row muted">${esc(name)} — no preferences</div>`;
-
-  const myArea = assignment[name];
-  const prefRows = relevant.map(s => {
-    const isArea = nodes[s.to] && !nodes[s.to].mobile;
-
-    let cls, tick, extraTag = '';
-    if (isArea) {
-      const sat = s.force > 0 ? (!!myArea && isInOrUnder(myArea, s.to, nodes))
-                               : (!!myArea && !isInOrUnder(myArea, s.to, nodes));
-      cls = sat ? 'ok' : 'bad'; tick = sat ? '✓' : '✗';
-    } else {
-      const toArea = assignment[s.to];
-      if (s.force > 0) {
-        const cl = (myArea && toArea) ? closeness(myArea, toArea, nodes) : 0;
-        if (cl >= 1)     { cls = 'ok';      tick = '✓'; }
-        else if (cl > 0) {
-          cls = 'partial'; tick = '~';
-          const lca = lcaPath(myArea, toArea, nodes);
-          if (lca) extraTag = ` <span class="tt-via">· ${esc(nodes[lca].name)}</span>`;
-        }
-        else             { cls = 'bad';     tick = '✗'; }
-      } else {
-        const sat = (toArea !== myArea);
-        cls = sat ? 'ok' : 'bad'; tick = sat ? '✓' : '✗';
-      }
-    }
-
-    const rel        = isArea ? esc(s.to.split('/').pop()) : esc(s.to);
-    const commentTag = s.comment ? ` <span class="tt-comment">${esc(s.comment)}</span>` : '';
-    return `<div class="tt-row ${cls}">${tick} ${esc(s.verb)} ${rel}${commentTag}${extraTag}</div>`;
-  }).join('');
-
-  return pinRow + prefRows;
-}
-
 /**
  * Render the assignment result as a nested HTML card tree.
  * Person cards are draggable; assignable areas have data-area for drop targets.
@@ -91,13 +52,11 @@ function renderAssignment(parsed, result, container) {
       const color = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
       const isPinned = name in pins;
       const pinnedClass = isPinned ? ' p-pinned' : '';
-      const ttHtml = buildTooltipHtml(name, springs, nodes, assignment, isPinned);
       const unpinBtn = isPinned
         ? `<button class="p-unpin" data-unpin="${esc(name)}" title="Remove pin">×</button>`
         : `<span class="p-pct">${pct}%</span>`;
       return `<div class="p-card${pinnedClass}" draggable="true" data-person="${esc(name)}" style="--hap:${pct}%;--hc:${color}">
         <div class="p-fill"></div>
-        <div class="tt">${ttHtml}</div>
         <span class="p-name">${esc(name)}</span>
         ${unpinBtn}
       </div>`;
