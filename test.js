@@ -24,111 +24,196 @@ console.log('\nParser');
 test('basic structure and people', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  8
+Alice
 
 == STRUCTURE ==
 Engineering
   Frontend  size:2-4
 
 == PREFERENCES ==
-@Alice  Alice -> Frontend
+Alice prefers Frontend
 `);
   ok(r.errors.length === 0, r.errors.join());
-  eq(r.nodes['Alice'].weight, 8);
+  ok('Alice' in r.nodes);
   eq(r.nodes['Engineering/Frontend'].sizeMin, 2);
   eq(r.nodes['Engineering/Frontend'].sizeMax, 4);
   eq(r.springs.length, 1);
-  eq(r.springs[0].force, 6);       // default force
+  eq(r.springs[0].force, 6);
+  eq(r.springs[0].verb, 'prefers');
   eq(r.springs[0].to, 'Engineering/Frontend');
 });
 
-test('default spring force is +6', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-
-== PREFERENCES ==
-@Alice  Alice -> Engineering
-`);
-  eq(r.springs[0].force, 6);
-});
-
-test('explicit force is used when provided', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-
-== PREFERENCES ==
-@Alice  Alice -> Engineering  :  +9
-`);
-  eq(r.springs[0].force, 9);
-});
-
-test('negative force spring', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-
-== PREFERENCES ==
-@Alice  Alice -> Engineering  :  -4
-`);
-  eq(r.springs[0].force, -4);
-});
-
-test('auto-create person with default strength 1', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-
-== PREFERENCES ==
-@Bob  Bob -> Engineering
-`);
-  ok(r.errors.length === 0, r.errors.join());
-  ok('Bob' in r.nodes, 'Bob not found');
-  eq(r.nodes['Bob'].weight, 1);
-  ok(r.mobileNodes.includes('Bob'));
-});
-
-test('explicit person strength overrides auto-create default', () => {
+test('prefers gives force +6', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  9
-
+Alice
 == STRUCTURE ==
 Engineering
-
 == PREFERENCES ==
-@Alice  Alice -> Engineering
+Alice prefers Engineering
 `);
-  eq(r.nodes['Alice'].weight, 9);
+  eq(r.springs[0].force, 6);
+  eq(r.springs[0].verb, 'prefers');
+});
+
+test('strongly prefers gives force +8', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+== STRUCTURE ==
+Engineering
+== PREFERENCES ==
+Alice strongly prefers Engineering
+`);
+  eq(r.springs[0].force, 8);
+  eq(r.springs[0].verb, 'strongly prefers');
+});
+
+test('requires gives force 100', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+== STRUCTURE ==
+Engineering
+== PREFERENCES ==
+Alice requires Engineering
+`);
+  eq(r.springs[0].force, 100);
+  eq(r.springs[0].verb, 'requires');
+});
+
+test('avoids gives force -6', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+== STRUCTURE ==
+Engineering
+== PREFERENCES ==
+Alice avoids Engineering
+`);
+  eq(r.springs[0].force, -6);
+  eq(r.springs[0].verb, 'avoids');
+});
+
+test('strongly avoids gives force -8', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Dave
+== PREFERENCES ==
+Alice strongly avoids Dave
+`);
+  eq(r.springs[0].force, -8);
+  eq(r.springs[0].verb, 'strongly avoids');
+});
+
+test('all verbs parse to correct forces', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+== STRUCTURE ==
+Engineering
+  Frontend
+== PREFERENCES ==
+Alice prefers Frontend
+Alice strongly prefers Frontend
+Alice requires Frontend
+Bob avoids Frontend
+Bob strongly avoids Frontend
+`);
+  ok(r.errors.length === 0, r.errors.join());
+  eq(r.springs[0].force, 6);
+  eq(r.springs[1].force, 8);
+  eq(r.springs[2].force, 100);
+  eq(r.springs[3].force, -6);
+  eq(r.springs[4].force, -8);
+});
+
+test('inline comment is parsed and stored on spring', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+== STRUCTURE ==
+Engineering
+  Frontend
+== PREFERENCES ==
+Alice strongly prefers Frontend  # requested by manager
+`);
+  ok(r.errors.length === 0, r.errors.join());
+  eq(r.springs[0].comment, 'requested by manager');
+  eq(r.springs[0].verb, 'strongly prefers');
+  eq(r.springs[0].from, 'Alice');
+  eq(r.springs[0].to, 'Engineering/Frontend');
+});
+
+test('preference without comment stores empty comment', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+== STRUCTURE ==
+Engineering
+== PREFERENCES ==
+Alice prefers Engineering
+`);
+  eq(r.springs[0].comment, '');
+});
+
+test('old @Author syntax produces an error', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Dave
+Bob
+== STRUCTURE ==
+Engineering
+  Frontend
+== PREFERENCES ==
+@Foo  Dave---Bob
+`);
+  ok(r.errors.length > 0, 'old @Author syntax should not parse');
+  eq(r.springs.length, 0);
+  ok(!('Foo' in r.nodes), 'Foo should not become a node');
+});
+
+test('person not in PEOPLE cannot appear as preference from', () => {
+  const r = parseInput(`
+== STRUCTURE ==
+Engineering
+== PREFERENCES ==
+Alice prefers Engineering
+`);
+  ok(r.errors.length > 0, 'expected error for unknown from-node');
+  eq(r.springs.length, 0);
 });
 
 test('path suffix resolution — unambiguous short name', () => {
   const r = parseInput(`
+== PEOPLE ==
+Alice
 == STRUCTURE ==
 Engineering
   Frontend
     Lead  size:1
-
 == PREFERENCES ==
-@Alice  Alice -> Lead  :  +8
+Alice strongly prefers Lead
 `);
   ok(r.errors.length === 0, r.errors.join());
   eq(r.springs[0].to, 'Engineering/Frontend/Lead');
 });
 
-test('path suffix resolution — partial path Frontend/Lead', () => {
+test('path suffix resolution — partial path', () => {
   const r = parseInput(`
+== PEOPLE ==
+Alice
 == STRUCTURE ==
 Engineering
   Frontend
     Lead  size:1
   Backend
     Lead  size:1
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend/Lead  :  +8
-@Alice  Alice -> Backend/Lead   :  +3
+Alice strongly prefers Frontend/Lead
+Alice prefers Backend/Lead
 `);
   ok(r.errors.length === 0, r.errors.join());
   eq(r.springs[0].to, 'Engineering/Frontend/Lead');
@@ -137,37 +222,19 @@ Engineering
 
 test('ambiguous bare name produces error', () => {
   const r = parseInput(`
+== PEOPLE ==
+Alice
 == STRUCTURE ==
 Engineering
   Frontend
     Lead  size:1
   Backend
     Lead  size:1
-
 == PREFERENCES ==
-@Alice  Alice -> Lead  :  +8
+Alice strongly prefers Lead
 `);
   ok(r.errors.some(e => e.toLowerCase().includes('ambiguous')), 'expected ambiguity error');
   eq(r.springs.length, 0);
-});
-
-test('third-party endorsement — author different from from-node', () => {
-  const r = parseInput(`
-== PEOPLE ==
-Carol  8
-
-== STRUCTURE ==
-Engineering
-  Frontend
-
-== PREFERENCES ==
-@Carol  Alice -> Frontend  :  +7
-`);
-  ok(r.errors.length === 0, r.errors.join());
-  eq(r.springs[0].author, 'Carol');
-  eq(r.springs[0].from, 'Alice');
-  eq(r.springs[0].to, 'Engineering/Frontend');
-  eq(r.nodes['Alice'].weight, 1);   // auto-created
 });
 
 test('multi-level structure paths are correct', () => {
@@ -196,27 +263,24 @@ Org
 test('PEOPLE order preserved in mobileNodes', () => {
   const r = parseInput(`
 == PEOPLE ==
-Charlie  6
-Alice    8
-Bob      4
+Charlie
+Alice
+Bob
 `);
   eq(r.mobileNodes, ['Charlie', 'Alice', 'Bob']);
 });
 
-test('auto-created persons appended after PEOPLE persons', () => {
+test('people not in PEOPLE section are not auto-created', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  6
-
+Alice
 == STRUCTURE ==
 Engineering
-
 == PREFERENCES ==
-@Alice  Alice -> Engineering
-@Bob    Bob   -> Engineering
+Alice prefers Engineering
 `);
-  eq(r.mobileNodes[0], 'Alice');
-  eq(r.mobileNodes[1], 'Bob');
+  eq(r.mobileNodes, ['Alice']);
+  eq(r.errors.length, 0, r.errors.join());
 });
 
 test('comments and blank lines are ignored', () => {
@@ -224,8 +288,8 @@ test('comments and blank lines are ignored', () => {
 # top comment
 
 == PEOPLE ==
-# this person has strength 6
-Alice  6
+# just a name
+Alice
 
 == STRUCTURE ==
 Engineering  # trailing comment
@@ -235,187 +299,79 @@ Engineering  # trailing comment
   ok('Engineering' in r.nodes);
 });
 
-// ── Shorthand syntax ──────────────────────────────────────────────
-console.log('\nShorthand syntax');
-
-test('single + is +6', () => {
+test('bad preference line produces an error', () => {
   const r = parseInput(`
 == STRUCTURE ==
 Engineering
 == PREFERENCES ==
-@Alice  Alice+Engineering
+@Alice  Alice -> Frontend : +8
 `);
-  ok(r.errors.length === 0, r.errors.join());
-  eq(r.springs[0].force, 6);
-  eq(r.springs[0].from, 'Alice');
-  eq(r.springs[0].to, 'Engineering');
-});
-
-test('double ++ is +8', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-== PREFERENCES ==
-@Alice  Alice++Engineering
-`);
-  eq(r.springs[0].force, 8);
-});
-
-test('triple +++ is +10', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-== PREFERENCES ==
-@Alice  Alice+++Engineering
-`);
-  eq(r.springs[0].force, 10);
-});
-
-test('single - is -6', () => {
-  const r = parseInput(`
-== PEOPLE ==
-Carol  5
-== STRUCTURE ==
-Engineering
-== PREFERENCES ==
-@Alice  Alice-Carol
-`);
-  eq(r.springs[0].force, -6);
-  eq(r.springs[0].from, 'Alice');
-  eq(r.springs[0].to, 'Carol');
-});
-
-test('double -- is -8', () => {
-  const r = parseInput(`
-== PEOPLE ==
-Dave  5
-== PREFERENCES ==
-@Alice  Alice--Dave
-`);
-  eq(r.springs[0].force, -8);
-});
-
-test('shorthand forces cap at 10', () => {
-  const r = parseInput(`
-== STRUCTURE ==
-Engineering
-== PREFERENCES ==
-@Alice  Alice+++++++Engineering
-`);
-  eq(r.springs[0].force, 10);
+  ok(r.errors.length > 0, 'expected parse error for old/unknown syntax');
+  eq(r.springs.length, 0);
 });
 
 // ── Solver ────────────────────────────────────────────────────────
 console.log('\nSolver');
 
 test('person assigned to highest-score area', () => {
+  // Alice strongly prefers Frontend (+8) vs Alice prefers Backend (+6) — Frontend wins
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-
+Alice
 == STRUCTURE ==
 Engineering
   Frontend  size:2-4
   Backend   size:2-4
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend  :  +8
-@Alice  Alice -> Backend   :  +3
+Alice strongly prefers Frontend
+Alice prefers Backend
 `);
   const { assignment } = solveAssignments(r);
   eq(assignment['Alice'], 'Engineering/Frontend');
 });
 
-test('author weight multiplies spring force in scoring', () => {
-  // Alice self-rates Frontend +4 (strength 5 → score 20)
-  // Carol (strength 9) endorses Alice for Backend +3 (score 27)
-  // Alice should go to Backend due to Carol's weight
+test('avoidance spring satisfied when people are in different areas', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-Carol  9
-
-== STRUCTURE ==
-Engineering
-  Frontend
-  Backend
-
-== PREFERENCES ==
-@Alice  Alice -> Frontend  :  +4
-@Carol  Alice -> Backend   :  +3
-`);
-  const { assignment } = solveAssignments(r);
-  eq(assignment['Alice'], 'Engineering/Backend');
-});
-
-test('auto-created author uses strength 1', () => {
-  // Bob (strength 1) endorses Alice for Backend +10 → score 10
-  // Alice self-rates Frontend +8 (strength 7) → score 56 — Frontend wins
-  const r = parseInput(`
-== PEOPLE ==
-Alice  7
-
-== STRUCTURE ==
-Engineering
-  Frontend
-  Backend
-
-== PREFERENCES ==
-@Alice  Alice -> Frontend  :  +8
-@Bob    Alice -> Backend   :  +10
-`);
-  const { assignment } = solveAssignments(r);
-  eq(assignment['Alice'], 'Engineering/Frontend');
-});
-
-test('negative person-to-person spring satisfied when in different areas', () => {
-  const r = parseInput(`
-== PEOPLE ==
-Carol  5
-Dave   5
-
+Carol
+Dave
 == STRUCTURE ==
 Engineering
   Frontend  size:3
   Backend   size:3
-
 == PREFERENCES ==
-@Carol  Carol-Dave
+Carol avoids Dave
 `);
   const { assignment, happiness } = solveAssignments(r);
   ok(assignment['Carol'] !== assignment['Dave'], 'Carol and Dave should be in different areas');
   ok(happiness['Carol'] >= 1, 'Carol should be happy');
 });
 
-test('positive person-to-person spring satisfied when in same area', () => {
+test('co-location preference satisfied when people are in the same area', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-Carol  5
-
+Alice
+Carol
 == STRUCTURE ==
 Engineering
-  Frontend  size:3
-  Backend   size:3
-
+  Frontend
+  Backend
 == PREFERENCES ==
-@Alice  Alice+Carol
+Alice prefers Carol
 `);
   const { assignment } = solveAssignments(r);
   eq(assignment['Alice'], assignment['Carol']);
 });
 
-test('ancestor area spring — parent area satisfied by leaf assignment', () => {
+test('parent area preference satisfied by any leaf under it', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-
+Alice
 == STRUCTURE ==
 Engineering
   Frontend
-
 == PREFERENCES ==
-@Alice  Alice -> Engineering  :  +8
+Alice strongly prefers Engineering
 `);
   const { assignment, happiness } = solveAssignments(r);
   ok(assignment['Alice'] === 'Engineering/Frontend', 'should assign to leaf under Engineering');
@@ -425,8 +381,7 @@ Engineering
 test('happiness is 1 for person with no preferences', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-
+Alice
 == STRUCTURE ==
 Engineering
   Frontend
@@ -435,43 +390,38 @@ Engineering
   eq(happiness['Alice'], 1);
 });
 
-test('capacity limit respected as hard max', () => {
+test('capacity limit is a hard maximum', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-Bob    5
-Carol  5
-
+Alice
+Bob
+Carol
 == STRUCTURE ==
 Engineering
   Frontend  size:1
   Backend   size:3
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend  :  +8
-@Bob    Bob   -> Frontend  :  +8
-@Carol  Carol -> Frontend  :  +8
+Alice strongly prefers Frontend
+Bob strongly prefers Frontend
+Carol strongly prefers Frontend
 `);
   const { assignment } = solveAssignments(r);
   const inFrontend = Object.values(assignment).filter(a => a === 'Engineering/Frontend').length;
   ok(inFrontend <= 1, `Frontend has capacity 1, got ${inFrontend}`);
 });
 
-test('happiness 0 when preference is unsatisfied', () => {
+test('happiness is 0 when only preference is blocked by capacity', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-
+Alice
 == STRUCTURE ==
 Engineering
   Frontend  size:0
   Backend
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend  :  +8
+Alice strongly prefers Frontend
 `);
   const { assignment, happiness } = solveAssignments(r);
-  // Frontend has max 0, so Alice goes to Backend — preference unsatisfied
   eq(assignment['Alice'], 'Engineering/Backend');
   eq(happiness['Alice'], 0);
 });
@@ -479,21 +429,19 @@ Engineering
 test('complex scenario: multiple people, mixed preferences', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  7
-Bob    6
-Carol  8
-Dave   5
-
+Alice
+Bob
+Carol
+Dave
 == STRUCTURE ==
 Engineering
   Frontend  size:2-3
   Backend   size:2-3
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend  :  +8
-@Bob    Bob -> Backend    :  +7
-@Carol  Carol -> Frontend  :  +9
-@Dave   Dave-Carol
+Alice strongly prefers Frontend
+Bob strongly prefers Backend
+Carol requires Frontend
+Dave avoids Carol
 `);
   const { assignment, happiness } = solveAssignments(r);
   eq(assignment['Alice'], 'Engineering/Frontend');
@@ -504,51 +452,231 @@ Engineering
 });
 
 test('swap step rescues greedy mistake — wrong person in capacity-1 area', () => {
-  // Alice (weight 1) weakly prefers Frontend (+3).
-  // Bob   (weight 1) strongly prefers Frontend (+8).
-  // Frontend size:1 — only one can go.
-  // Greedy (mobileNodes order: Alice first) puts Alice in Frontend.
-  // Single-move hill-climbing can't move Bob to Frontend because it's full.
-  // Swap step swaps Alice ↔ Bob → Bob in Frontend (score 8), Alice in Backend (score 0).
+  // Alice weakly prefers Frontend (6); Bob strongly prefers Frontend (8).
+  // Greedy (PEOPLE order: Alice first) puts Alice in Frontend.
+  // Swap step swaps Alice↔Bob → Bob gets Frontend (score 8 > 6).
   const r = parseInput(`
 == PEOPLE ==
-Alice  1
-Bob    1
-
+Alice
+Bob
 == STRUCTURE ==
 Engineering
   Frontend  size:1
   Backend   size:1
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend  :  +3
-@Bob    Bob -> Frontend    :  +8
+Alice prefers Frontend
+Bob strongly prefers Frontend
 `);
   const { assignment } = solveAssignments(r);
   eq(assignment['Bob'], 'Engineering/Frontend', 'Bob should win the capacity-1 Frontend slot');
   eq(assignment['Alice'], 'Engineering/Backend');
 });
 
-test('computeHappiness reflects manual override', () => {
+test('avoidance area spring is satisfied when person is elsewhere', () => {
   const r = parseInput(`
 == PEOPLE ==
-Alice  5
-
+Bob
 == STRUCTURE ==
 Engineering
   Frontend
   Backend
-
 == PREFERENCES ==
-@Alice  Alice -> Frontend  :  +8
+Bob strongly avoids Backend
+`);
+  const { assignment, happiness } = solveAssignments(r);
+  eq(assignment['Bob'], 'Engineering/Frontend', 'solver should place Bob away from Backend');
+  eq(happiness['Bob'], 1);
+});
+
+test('avoidance area spring is unsatisfied when person is in that area', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Bob
+== STRUCTURE ==
+Engineering
+  Frontend  size:0
+  Backend
+== PREFERENCES ==
+Bob strongly avoids Backend
+`);
+  const { assignment, happiness } = solveAssignments(r);
+  eq(assignment['Bob'], 'Engineering/Backend');
+  eq(happiness['Bob'], 0);
+});
+
+test('computeHappiness reflects manual override', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+== STRUCTURE ==
+Engineering
+  Frontend
+  Backend
+== PREFERENCES ==
+Alice strongly prefers Frontend
 `);
   const { assignment } = solveAssignments(r);
   eq(assignment['Alice'], 'Engineering/Frontend');
 
-  // Manually override to Backend — happiness should drop to 0
   assignment['Alice'] = 'Engineering/Backend';
   const hap = computeHappiness(r, assignment);
   eq(hap['Alice'], 0);
+});
+
+test('pinned person stays put; free people re-optimize around them', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+== STRUCTURE ==
+Engineering
+  Frontend  size:1
+  Backend   size:1
+== PREFERENCES ==
+Alice requires Frontend
+Bob requires Frontend
+`);
+  const pins = { Bob: 'Engineering/Backend' };
+  const { assignment } = solveAssignments(r, pins);
+  eq(assignment['Bob'], 'Engineering/Backend', 'pinned person must not move');
+  eq(assignment['Alice'], 'Engineering/Frontend', 'free person should take best remaining spot');
+});
+
+test('pinned occupancy counts toward capacity; free people cannot overflow', () => {
+  // Frontend size:1 has Carol pinned there. Alice also prefers Frontend but cannot go.
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Carol
+== STRUCTURE ==
+Engineering
+  Frontend  size:1
+  Backend
+== PREFERENCES ==
+Alice requires Frontend
+`);
+  const pins = { Carol: 'Engineering/Frontend' };
+  const { assignment } = solveAssignments(r, pins);
+  eq(assignment['Carol'], 'Engineering/Frontend', 'pinned person stays');
+  eq(assignment['Alice'], 'Engineering/Backend', 'free person blocked by pinned capacity');
+});
+
+test('requires beats strongly prefers for a capacity-1 slot', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+== STRUCTURE ==
+Engineering
+  Lead    size:1
+  General
+== PREFERENCES ==
+Alice requires Lead
+Bob strongly prefers Lead
+`);
+  const { assignment } = solveAssignments(r);
+  eq(assignment['Alice'], 'Engineering/Lead', 'requires (100) must beat strongly prefers (8)');
+  eq(assignment['Bob'], 'Engineering/General');
+});
+
+test('no preferences — people spread across all areas', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+Carol
+Dave
+== STRUCTURE ==
+Engineering
+  Frontend
+  Backend
+`);
+  const { assignment } = solveAssignments(r);
+  const inFrontend = Object.values(assignment).filter(a => a === 'Engineering/Frontend').length;
+  const inBackend  = Object.values(assignment).filter(a => a === 'Engineering/Backend').length;
+  ok(inFrontend >= 1, `Frontend should have at least 1 person, got ${inFrontend}`);
+  ok(inBackend >= 1, `Backend should have at least 1 person, got ${inBackend}`);
+});
+
+test('fill minimums before preferences', () => {
+  // Alice and Bob both prefer Frontend, but Backend min:2 must be filled first.
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+Carol
+Dave
+== STRUCTURE ==
+Engineering
+  Frontend  size:1-2
+  Backend   size:2-3
+== PREFERENCES ==
+Alice strongly prefers Frontend
+Bob strongly prefers Frontend
+`);
+  const { assignment } = solveAssignments(r);
+  const inBackend = Object.values(assignment).filter(a => a === 'Engineering/Backend').length;
+  ok(inBackend >= 2, `Backend minimum not met: ${inBackend} people`);
+});
+
+test('co-location closeness: partial when people are in adjacent areas', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+== STRUCTURE ==
+Engineering
+  Frontend  size:2-4
+    Lead    size:1
+  Backend
+== PREFERENCES ==
+Alice prefers Bob
+`);
+  const pins = { Bob: 'Engineering/Frontend/Lead' };
+  const { assignment, happiness } = solveAssignments(r, pins);
+  eq(assignment['Bob'], 'Engineering/Frontend/Lead', 'Bob stays pinned');
+  eq(assignment['Alice'], 'Engineering/Frontend', 'Alice prefers Frontend subtree to be close to Bob');
+  ok(Math.abs(happiness['Alice'] - 0.5) < 0.01, `expected happiness ≈ 0.5, got ${happiness['Alice']}`);
+});
+
+test('co-location closeness: solver prefers adjacent area over distant area', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+== STRUCTURE ==
+Engineering
+  Frontend  size:2-4
+    Lead    size:1
+  Backend
+== PREFERENCES ==
+Alice prefers Bob
+`);
+  const pins = { Bob: 'Engineering/Frontend/Lead' };
+  const { assignment } = solveAssignments(r, pins);
+  eq(assignment['Alice'], 'Engineering/Frontend', 'LCA pull prefers Frontend over Backend');
+});
+
+test('people can be assigned directly to non-leaf area with explicit capacity', () => {
+  const r = parseInput(`
+== PEOPLE ==
+Alice
+Bob
+Carol
+== STRUCTURE ==
+Engineering
+  Frontend  size:2-4
+    Lead    size:1
+== PREFERENCES ==
+Alice strongly prefers Lead
+`);
+  ok(r.errors.length === 0, r.errors.join());
+  const { assignment } = solveAssignments(r);
+  eq(assignment['Alice'], 'Engineering/Frontend/Lead');
+  const totalInFrontend = Object.values(assignment).filter(a =>
+    a === 'Engineering/Frontend' || a === 'Engineering/Frontend/Lead'
+  ).length;
+  eq(totalInFrontend, 3, 'all 3 people should end up under Engineering/Frontend');
 });
 
 console.log('');

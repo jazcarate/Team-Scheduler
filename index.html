@@ -12,19 +12,46 @@
 
   <header>
     <h1>Team Scheduler</h1>
-    <button class="btn primary" id="btn-solve">Solve</button>
-    <button class="btn" id="btn-reset">Reset</button>
-    <span class="btn-sep"></span>
-    <button class="btn" id="btn-copy-md">Copy MD</button>
+    <div class="header-actions">
+      <button class="btn primary" id="btn-solve">Solve</button>
+      <button class="btn ghost" id="btn-reset">Clear Pins</button>
+      <div class="sep"></div>
+      <button class="btn ghost" id="btn-undo" disabled title="Ctrl+Z">Undo</button>
+      <button class="btn ghost" id="btn-redo" disabled title="Ctrl+Y / Ctrl+Shift+Z">Redo</button>
+      <div class="sep"></div>
+      <button class="btn ghost" id="btn-copy-md">Copy as Markdown</button>
+    </div>
     <span id="stat"></span>
   </header>
 
   <main>
-    <div id="editor-panel">
-      <div class="panel-label">Input</div>
+    <aside id="left-panel">
+      <div class="guide">
+        <div class="guide-section">
+          <span class="guide-kw">== PEOPLE ==</span>
+          <span class="guide-desc">One name per line — full roster to be scheduled</span>
+        </div>
+        <div class="guide-section">
+          <span class="guide-kw">== STRUCTURE ==</span>
+          <span class="guide-desc">Areas — indent for sub-areas, add size:MIN-MAX</span>
+        </div>
+        <div class="guide-section">
+          <span class="guide-kw">== PREFERENCES ==</span>
+          <span class="guide-desc">Name prefers/avoids Area-or-Person &nbsp;·&nbsp; Name requires Area &nbsp;·&nbsp; # inline comment</span>
+        </div>
+        <div class="pref-key">
+          <span class="pk pk-p1"><span>prefers</span></span>
+          <span class="pk pk-p2"><span>strongly prefers</span></span>
+          <span class="pk pk-req"><span>requires</span></span>
+          <span class="pk-sep"></span>
+          <span class="pk pk-n1"><span>avoids</span></span>
+          <span class="pk pk-n2"><span>strongly avoids</span></span>
+        </div>
+      </div>
       <textarea id="input" spellcheck="false"></textarea>
-    </div>
-    <div id="viz-panel">
+    </aside>
+
+    <div id="right-panel">
       <div id="viz-wrap"></div>
     </div>
   </main>

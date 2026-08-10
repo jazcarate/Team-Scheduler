@@ -6,7 +6,6 @@
  * @property {string} path    canonical unique identifier, e.g. "Engineering/Frontend/Lead"
  *                            For people, path === name.
  * @property {boolean} mobile true = person; false = structural area
- * @property {number} weight  strength 1–10; author's strength weights outgoing preferences
  * @property {number} sizeMin soft lower-bound on total assigned members (0 = unconstrained)
  * @property {number} sizeMax soft upper-bound (999 = unconstrained)
  * @property {string[]} children  child node paths
@@ -15,10 +14,11 @@
 
 /**
  * @typedef {Object} PreferenceDef
- * @property {string} author  person whose strength scales this preference
- * @property {string} from    resolved path — source node
- * @property {string} to      resolved path — destination node
- * @property {number} force   positive = attraction, negative = avoidance; default +6
+ * @property {string} from     resolved path — person whose placement this affects (must be in PEOPLE)
+ * @property {string} to       resolved path — destination node
+ * @property {number} force    positive = attraction, negative = avoidance
+ * @property {string} verb     'prefers' | 'strongly prefers' | 'requires' | 'avoids' | 'strongly avoids'
+ * @property {string} comment  optional inline comment (text after # on the preference line)
  */
 
 /**
@@ -32,7 +32,7 @@
 
 /**
  * Resolve a reference to a canonical node path.
- * Supports exact match ("Engineering") and path suffix ("Frontend/Lead").
+ * Supports exact match and path suffix ("Frontend/Lead").
  * @param {string} ref
  * @param {Record<string,NodeDef>} nodes
  * @param {string[]} errors
@@ -40,8 +40,13 @@
  */
 function resolveRef(ref, nodes, errors) {
   if (ref in nodes) return ref;
-  const suffix = '/' + ref;
-  const matches = Object.keys(nodes).filter(p => p.endsWith(suffix));
+  const refLow = ref.toLowerCase();
+  // Case-insensitive exact match
+  const ci = Object.keys(nodes).find(p => p.toLowerCase() === refLow);
+  if (ci) return ci;
+  // Case-insensitive suffix match
+  const suffixLow = '/' + refLow;
+  const matches = Object.keys(nodes).filter(p => p.toLowerCase().endsWith(suffixLow));
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
     errors.push(`Ambiguous reference "${ref}" — could be: ${matches.join(', ')}`);
@@ -51,19 +56,29 @@ function resolveRef(ref, nodes, errors) {
   return null;
 }
 
+// Ordered longest-first to avoid prefix clashes (e.g. "strongly prefers" before "prefers")
+const PREF_VERBS = [
+  ['strongly prefers', 8],
+  ['strongly avoids',  -8],
+  ['prefers',          6],
+  ['avoids',           -6],
+  ['requires',         100],
+];
+
 /** @param {string} text @returns {ParseResult} */
 function parseInput(text) {
   /** @type {Record<string,NodeDef>} */ const nodes = {};
   /** @type {string[]} */ const rootNodes = [];
   /** @type {string[]} */ const mobileNodes = [];
   /** @type {string[]} */ const errors = [];
-  /** @type {Array<{author:string,fromRef:string,toRef:string,force:number|null}>} */
+  /** @type {Array<{fromRef:string,toRef:string,force:number,verb:string,comment:string}>} */
   const rawPrefs = [];
 
   let section = null;
   /** @type {{path:string,indent:number}[]} */ const stack = [];
 
   for (const raw of text.split('\n')) {
+    // Strip trailing comments for structural scanning; PREFERENCES re-reads raw for inline comments
     const stripped = raw.replace(/#.*$/, '');
     if (!stripped.trim()) continue;
     const indent = stripped.length - stripped.trimStart().length;
@@ -77,18 +92,10 @@ function parseInput(text) {
     }
 
     if (section === 'PEOPLE') {
-      const parts = line.split(/\s+/);
-      const name = parts[0];
+      const name = line.split(/\s+/)[0];
       if (!name) continue;
-      let weight = 5;
-      for (const p of parts.slice(1)) {
-        const wm = p.match(/^strength:([\d.]+)/i);
-        if (wm) { weight = parseFloat(wm[1]) || 5; continue; }
-        const n = parseFloat(p);
-        if (!isNaN(n)) weight = n;
-      }
       if (name in nodes) { errors.push(`Duplicate name: "${name}"`); continue; }
-      nodes[name] = { name, path: name, mobile: true, weight, sizeMin: 0, sizeMax: 999, children: [], parent: null };
+      nodes[name] = { name, path: name, mobile: true, sizeMin: 0, sizeMax: 999, children: [], parent: null };
       mobileNodes.push(name);
       continue;
     }
@@ -111,7 +118,7 @@ function parseInput(text) {
 
       const path = parentPath ? `${parentPath}/${name}` : name;
       if (path in nodes) { errors.push(`Duplicate structural path: "${path}"`); continue; }
-      nodes[path] = { name, path, mobile: false, weight: 1, sizeMin, sizeMax, children: [], parent: parentPath };
+      nodes[path] = { name, path, mobile: false, sizeMin, sizeMax, children: [], parent: parentPath };
       if (parentPath) nodes[parentPath].children.push(path);
       else rootNodes.push(path);
       stack.push({ path, indent });
@@ -119,53 +126,38 @@ function parseInput(text) {
     }
 
     if (section === 'PREFERENCES') {
-      // Shorthand: @Author From+Target (each sign beyond first adds ±2; + → +6, ++ → +8, - → -6, -- → -8)
-      const short = line.match(/^@(\S+)\s+(\S+?)(\++|-+)(\S+)\s*$/);
-      if (short) {
-        const signs = short[3];
-        const neg = signs[0] === '-';
-        const force = (neg ? -1 : 1) * Math.min(4 + signs.length * 2, 10);
-        rawPrefs.push({ author: short[1], fromRef: short[2], toRef: short[4], force });
-        continue;
+      // Use the original raw line so the inline # comment is preserved
+      const rawLine = raw.trim();
+      if (!rawLine || rawLine.startsWith('#')) continue;
+
+      let matched = false;
+      for (const [verb, force] of PREF_VERBS) {
+        // Allow one or more spaces between words in multi-word verbs
+        const verbRe = verb.replace(/\s+/g, '\\s+');
+        const m = rawLine.match(new RegExp(`^(\\S+)\\s+${verbRe}\\s+(\\S+)(?:\\s*#\\s*(.+))?$`, 'i'));
+        if (m) {
+          rawPrefs.push({ fromRef: m[1], toRef: m[2], force, verb, comment: (m[3] || '').trim() });
+          matched = true;
+          break;
+        }
       }
-      // Verbose: @Author From -> To : Force
-      const m = line.match(/^@(\S+)\s+(.+?)\s*->\s*(.+?)(?:\s*:\s*([-+]?[\d.]+))?\s*$/);
-      if (!m) { errors.push(`Bad preference (expected "@Author From -> To" or "@Author From+Target"): ${line}`); continue; }
-      rawPrefs.push({
-        author: m[1].trim(),
-        fromRef: m[2].trim(),
-        toRef: m[3].trim(),
-        force: m[4] !== undefined ? parseFloat(m[4]) : null,
-      });
+      if (!matched) {
+        errors.push(`Bad preference (expected "Name prefers/avoids/requires Target  # comment"): ${rawLine.split('#')[0].trim()}`);
+      }
       continue;
     }
   }
 
-  // Auto-create any persons mentioned in preferences but absent from PEOPLE.
-  // Only bare names (no '/') that don't suffix-match a structural node are treated as persons.
-  const isStructuralRef = (ref) => {
-    if (ref in nodes && !nodes[ref].mobile) return true;
-    if (ref.includes('/')) return true;
-    return Object.keys(nodes).some(p => p.endsWith('/' + ref) && !nodes[p].mobile);
-  };
-  for (const rp of rawPrefs) {
-    for (const ref of [rp.author, rp.fromRef, rp.toRef]) {
-      if (ref in nodes || isStructuralRef(ref)) continue;
-      nodes[ref] = { name: ref, path: ref, mobile: true, weight: 1, sizeMin: 0, sizeMax: 999, children: [], parent: null };
-      mobileNodes.push(ref);
-    }
-  }
-
-  // Resolve preferences now that all nodes (including auto-created) are known.
+  // Resolve preferences
   /** @type {PreferenceDef[]} */ const springs = [];
   for (const rp of rawPrefs) {
-    if (!nodes[rp.author] || !nodes[rp.author].mobile) {
-      errors.push(`Preference author must be a person: "${rp.author}"`); continue;
-    }
     const from = resolveRef(rp.fromRef, nodes, errors);
-    const to = resolveRef(rp.toRef, nodes, errors);
+    const to   = resolveRef(rp.toRef,   nodes, errors);
     if (from !== null && to !== null) {
-      springs.push({ author: rp.author, from, to, force: rp.force !== null ? rp.force : 6 });
+      if (!nodes[from].mobile) {
+        errors.push(`Preference "from" must be a person from == PEOPLE ==: "${rp.fromRef}"`); continue;
+      }
+      springs.push({ from, to, force: rp.force, verb: rp.verb, comment: rp.comment });
     }
   }
 

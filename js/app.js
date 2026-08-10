@@ -1,88 +1,173 @@
 'use strict';
 
-const EXAMPLE = `# Edit preferences below and click Solve.
-# Shorthand: @Author Person+Person (+6), @Author Person++Person (+8)
-#            @Author Person-Person (-6), @Author Person--Person (-8)
-
-== PEOPLE ==
-# Name   strength (1–10) — omit to default to strength 1
-Alice   7
+const EXAMPLE = `== PEOPLE ==
+Alice
+Carol
+Bob
+Dave
 
 == STRUCTURE ==
-# Name  [size:MIN-MAX]   — indentation = parent–child
 Engineering
   Frontend  size:2-4
   Backend   size:2-3
 
 == PREFERENCES ==
-# Verbose:   @Author From -> Area  : Force
-# Shorthand: @Author From+Person   (Force defaults to ±6)
-@Alice  Alice -> Frontend  :  +8
-@Carol  Carol+Alice
-@Carol  Carol -> Frontend  :  +7
-@Bob    Bob -> Backend
-@Dave   Dave -> Backend    :  +6
-@Dave   Dave-Carol
+Alice strongly prefers Frontend
+Carol prefers Alice
+Carol strongly prefers Frontend
+Bob prefers Backend
+Dave prefers Backend
+Dave avoids Carol
 `;
 
-const LS_KEY = 'scheduler_input_v1';
-const LS_TTL = 10 * 24 * 60 * 60 * 1000; // 10 days
+const LS_KEY = 'scheduler_v2';
+const LS_TTL = 10 * 24 * 60 * 60 * 1000;
 
-function saveToStorage(text) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify({ v: text, ts: Date.now() })); } catch (e) { }
+function saveToStorage(text, pins) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({ v: text, pins: pins || {}, ts: Date.now() }));
+  } catch (e) { }
 }
 
 function loadFromStorage() {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return null;
-    const { v, ts } = JSON.parse(raw);
-    if (Date.now() - ts > LS_TTL) { localStorage.removeItem(LS_KEY); return null; }
-    return v;
+    const data = JSON.parse(raw);
+    if (Date.now() - data.ts > LS_TTL) { localStorage.removeItem(LS_KEY); return null; }
+    return { text: data.v, pins: data.pins || {} };
   } catch (e) { return null; }
 }
 
 (function () {
-  const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
-  const vizEl = /** @type {HTMLElement} */ (document.getElementById('viz-wrap'));
-  const btnSolve = /** @type {HTMLButtonElement} */ (document.getElementById('btn-solve'));
-  const btnReset = /** @type {HTMLButtonElement} */ (document.getElementById('btn-reset'));
+  const inputEl   = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
+  const vizEl     = /** @type {HTMLElement} */ (document.getElementById('viz-wrap'));
+  const btnSolve  = /** @type {HTMLButtonElement} */ (document.getElementById('btn-solve'));
+  const btnReset  = /** @type {HTMLButtonElement} */ (document.getElementById('btn-reset'));
+  const btnUndo   = /** @type {HTMLButtonElement} */ (document.getElementById('btn-undo'));
+  const btnRedo   = /** @type {HTMLButtonElement} */ (document.getElementById('btn-redo'));
   const btnCopyMd = /** @type {HTMLButtonElement} */ (document.getElementById('btn-copy-md'));
-  const statEl = document.getElementById('stat');
+  const statEl    = document.getElementById('stat');
 
   // ── State ──────────────────────────────────────────────────────
-  let currentParsed = null;
+  let currentParsed     = null;
   let currentAssignment = null;
-  let currentHappiness = null;
+  let currentHappiness  = null;
+  let currentPins       = {};
+
+  // ── Undo / Redo ────────────────────────────────────────────────
+  /** @type {Array<{assignment:object,pins:object,happiness:object}>} */
+  const undoStack = [];
+  const redoStack = [];
+
+  function snapshotState() {
+    return {
+      assignment: Object.assign({}, currentAssignment),
+      pins:       Object.assign({}, currentPins),
+      happiness:  Object.assign({}, currentHappiness),
+    };
+  }
+
+  function pushUndo() {
+    if (!currentAssignment) return;
+    undoStack.push(snapshotState());
+    redoStack.length = 0;
+    syncUndoButtons();
+  }
+
+  function applySnapshot(snap) {
+    currentAssignment = Object.assign({}, snap.assignment);
+    currentPins       = Object.assign({}, snap.pins);
+    currentHappiness  = Object.assign({}, snap.happiness);
+    renderState();
+    syncUndoButtons();
+  }
+
+  function syncUndoButtons() {
+    if (btnUndo) btnUndo.disabled = undoStack.length === 0;
+    if (btnRedo) btnRedo.disabled = redoStack.length === 0;
+  }
+
+  function undo() {
+    if (!undoStack.length) return;
+    redoStack.push(snapshotState());
+    applySnapshot(undoStack.pop());
+  }
+
+  function redo() {
+    if (!redoStack.length) return;
+    undoStack.push(snapshotState());
+    applySnapshot(redoStack.pop());
+  }
 
   // ── Init ───────────────────────────────────────────────────────
-  inputEl.value = loadFromStorage() ?? EXAMPLE;
+  const stored = loadFromStorage();
+  inputEl.value = stored ? stored.text : EXAMPLE;
+  currentPins   = stored ? stored.pins : {};
   run();
+  syncUndoButtons();
 
-  // ── Input persistence (debounced) ──────────────────────────────
+  // ── Persistence ────────────────────────────────────────────────
   let saveTimer = null;
   inputEl.addEventListener('input', () => {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveToStorage(inputEl.value), 800);
+    saveTimer = setTimeout(() => saveToStorage(inputEl.value, currentPins), 800);
   });
 
   // ── Buttons ────────────────────────────────────────────────────
-  btnSolve.addEventListener('click', run);
+  btnSolve.addEventListener('click', () => { pushUndo(); run(); });
 
   btnReset.addEventListener('click', () => {
-    localStorage.removeItem(LS_KEY);
-    inputEl.value = EXAMPLE;
+    pushUndo();
+    currentPins = {};
+    saveToStorage(inputEl.value, currentPins);
     run();
   });
 
+  if (btnUndo) btnUndo.addEventListener('click', undo);
+  if (btnRedo) btnRedo.addEventListener('click', redo);
+
   btnCopyMd.addEventListener('click', copyMd);
 
-  // ── Drag-and-drop (event delegation on stable container) ───────
+  // ── Keyboard shortcuts ─────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (e.target && e.target.tagName === 'TEXTAREA') return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+    if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+  });
+
+  // ── Unpin click (event delegation) ────────────────────────────
+  vizEl.addEventListener('click', e => {
+    const btn = /** @type {HTMLElement} */ (e.target).closest('[data-unpin]');
+    if (!btn) return;
+    e.stopPropagation();
+    pushUndo();
+    delete currentPins[btn.dataset.unpin];
+    // Stay in staging — recompute happiness but don't re-solve
+    if (currentParsed && currentAssignment) {
+      currentHappiness = computeHappiness(currentParsed, currentAssignment);
+    }
+    saveToStorage(inputEl.value, currentPins);
+    renderState();
+  });
+
+  // ── Drag-and-drop ──────────────────────────────────────────────
   vizEl.addEventListener('dragstart', e => {
     const card = /** @type {HTMLElement} */ (e.target).closest('[data-person]');
     if (!card) return;
-    e.dataTransfer.setData('text/plain', card.dataset.person);
+    // Hide tooltip before browser snapshots the drag ghost, restore after
+    const tt = card.querySelector('.tt');
+    if (tt) tt.style.display = 'none';
+    requestAnimationFrame(() => { if (tt) tt.style.display = ''; });
+    const person = card.dataset.person;
+    e.dataTransfer.setData('text/plain', person);
     e.dataTransfer.effectAllowed = 'move';
+    highlightPreferences(person);
+  });
+
+  document.addEventListener('dragend', () => {
+    clearDragHighlights();
   });
 
   vizEl.addEventListener('dragover', e => {
@@ -104,19 +189,129 @@ function loadFromStorage() {
     leaf.classList.remove('drag-over');
     const person = e.dataTransfer.getData('text/plain');
     if (!person || !currentParsed || !currentAssignment) return;
-    currentAssignment[person] = leaf.dataset.area;
+    const area = leaf.dataset.area;
+    if (currentAssignment[person] === area) return; // no-op
+
+    pushUndo();
+    currentPins[person] = area;
+    currentAssignment[person] = area;
+    // Recompute happiness without re-solving (staging: other people stay put)
     currentHappiness = computeHappiness(currentParsed, currentAssignment);
+    saveToStorage(inputEl.value, currentPins);
     renderState();
   });
 
+  // ── Drag preference highlights ─────────────────────────────────
+  function escAttr(s) {
+    return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  function hlClass(force) {
+    if (force >= 99) return 'drag-req';
+    if (force >= 8)  return 'drag-pref-2';
+    if (force > 0)   return 'drag-pref-1';
+    if (force <= -8) return 'drag-avd-2';
+    return 'drag-avd-1';
+  }
+
+  function hlBadgeClass(force) {
+    if (force >= 99) return 'pref-badge-req';
+    if (force >= 8)  return 'pref-badge-2';
+    if (force > 0)   return 'pref-badge-1';
+    if (force <= -8) return 'pref-badge-n2';
+    return 'pref-badge-n1';
+  }
+
+  function highlightPreferences(person) {
+    if (!currentParsed || !currentAssignment) return;
+    const { nodes, springs } = currentParsed;
+
+    // Strongest preference per area element
+    /** @type {Map<Element,{force:number,verb:string,label:string}>} */
+    const areaHL = new Map();
+    // Strongest preference per person element
+    /** @type {Map<Element,{force:number}>} */
+    const personHL = new Map();
+
+    function addAreaHL(path, force, verb, label) {
+      const el = vizEl.querySelector(`[data-area="${escAttr(path)}"]`);
+      if (!el) return;
+      const ex = areaHL.get(el);
+      if (!ex || Math.abs(force) > Math.abs(ex.force)) areaHL.set(el, { force, verb, label });
+    }
+
+    function addPersonHL(name, force) {
+      if (name === person) return;
+      const el = vizEl.querySelector(`[data-person="${escAttr(name)}"]`);
+      if (!el) return;
+      const ex = personHL.get(el);
+      if (!ex || Math.abs(force) > Math.abs(ex.force)) personHL.set(el, { force });
+    }
+
+    // Person's own preferences
+    for (const s of springs) {
+      if (s.from !== person) continue;
+      const nd = nodes[s.to]; if (!nd) continue;
+      if (!nd.mobile) {
+        // Area spring: highlight area
+        addAreaHL(s.to, s.force, s.verb, s.verb);
+      } else {
+        // Person spring: highlight that person's card directly
+        addPersonHL(s.to, s.force);
+        // Also highlight their current area so you know where to drag
+        const toArea = currentAssignment[s.to];
+        if (toArea) addAreaHL(toArea, s.force, s.verb, `${s.verb} ${s.to}`);
+      }
+    }
+
+    // Others who prefer to be near this person — highlight their cards + area
+    for (const s of springs) {
+      if (s.to !== person || s.force <= 0) continue;
+      if (!nodes[s.from] || !nodes[s.from].mobile) continue;
+      addPersonHL(s.from, s.force);
+      const fromArea = currentAssignment[s.from];
+      if (fromArea) addAreaHL(fromArea, s.force, s.verb, s.from);
+    }
+
+    // Dim source area
+    const srcArea = currentAssignment[person];
+    if (srcArea) {
+      const el = vizEl.querySelector(`[data-area="${escAttr(srcArea)}"]`);
+      if (el) el.classList.add('drag-source');
+    }
+
+    // Apply area highlights + badges
+    for (const [el, info] of areaHL) {
+      el.classList.add(hlClass(info.force));
+      const badge = document.createElement('div');
+      badge.className = `pref-badge ${hlBadgeClass(info.force)}`;
+      badge.setAttribute('data-drag-badge', '');
+      badge.textContent = info.label;
+      el.appendChild(badge);
+    }
+
+    // Apply person card highlights
+    for (const [el, info] of personHL) {
+      el.classList.add(hlClass(info.force));
+    }
+  }
+
+  const HL_CLASSES = ['drag-pref-1','drag-pref-2','drag-req','drag-avd-1','drag-avd-2','drag-source'];
+
+  function clearDragHighlights() {
+    vizEl.querySelectorAll(HL_CLASSES.map(c => `.${c}`).join(',')).forEach(el =>
+      el.classList.remove(...HL_CLASSES));
+    vizEl.querySelectorAll('[data-drag-badge]').forEach(el => el.remove());
+  }
+
   // ── Core ───────────────────────────────────────────────────────
   function run() {
-    saveToStorage(inputEl.value);
+    saveToStorage(inputEl.value, currentPins);
     const parsed = parseInput(inputEl.value);
     currentParsed = parsed;
 
     if (parsed.mobileNodes.length === 0 && parsed.rootNodes.length === 0) {
-      vizEl.innerHTML = '<div class="viz-msg">Add people and structure to get started.</div>';
+      vizEl.innerHTML = '<div class="viz-msg">Fill in the editor to get started.</div>';
       return;
     }
 
@@ -130,21 +325,33 @@ function loadFromStorage() {
       }
     }
 
-    const result = solveAssignments(parsed);
-    currentAssignment = result.assignment;
-    currentHappiness = result.happiness;
+    // Drop stale pins before solving
+    for (const person of Object.keys(currentPins)) {
+      const area = currentPins[person];
+      if (!parsed.mobileNodes.includes(person) || !(area in parsed.nodes) || parsed.nodes[area].mobile) {
+        delete currentPins[person];
+      }
+    }
+
+    const result = solveAssignments(parsed, currentPins);
+    currentAssignment = Object.assign({}, result.assignment);
+    currentHappiness  = result.happiness;
 
     renderState();
     if (errHtml) vizEl.insertAdjacentHTML('afterbegin', errHtml);
 
     const nPeople = parsed.mobileNodes.length;
-    const nAreas = Object.keys(parsed.nodes).filter(p => !parsed.nodes[p].mobile).length;
+    const nAreas  = Object.keys(parsed.nodes).filter(p => !parsed.nodes[p].mobile).length;
     if (statEl) statEl.textContent = `${nPeople} people · ${nAreas} areas`;
   }
 
   function renderState() {
     if (!currentParsed || !currentAssignment) return;
-    renderAssignment(currentParsed, { assignment: currentAssignment, happiness: currentHappiness }, vizEl);
+    renderAssignment(
+      currentParsed,
+      { assignment: currentAssignment, happiness: currentHappiness, pins: currentPins },
+      vizEl,
+    );
   }
 
   // ── Export ─────────────────────────────────────────────────────
@@ -156,15 +363,12 @@ function loadFromStorage() {
 
     function walk(path, depth) {
       const nd = nodes[path];
-      const hashes = '#'.repeat(depth + 1);
-      lines.push(`${hashes} ${nd.name}`);
+      lines.push('#'.repeat(depth + 1) + ' ' + nd.name);
       if (nd.children.length) {
         for (const child of nd.children) walk(child, depth + 1);
       } else {
-        // leaf — list assigned people
         const people = Object.entries(currentAssignment)
-          .filter(([, a]) => a === path)
-          .map(([n]) => n);
+          .filter(([, a]) => a === path).map(([n]) => n);
         if (people.length) {
           for (const name of people) lines.push(`- ${name}`);
         } else {
