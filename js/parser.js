@@ -5,8 +5,8 @@
  * @property {string} name    short display label (non-unique within the tree)
  * @property {string} path    canonical unique identifier, e.g. "Engineering/Frontend/Lead"
  *                            For people, path === name.
- * @property {boolean} mobile true = person (moves in sim); false = structural area (fixed)
- * @property {number} weight  strength 1–10; author's strength weights outgoing springs
+ * @property {boolean} mobile true = person; false = structural area
+ * @property {number} weight  strength 1–10; author's strength weights outgoing preferences
  * @property {number} sizeMin soft lower-bound on total assigned members (0 = unconstrained)
  * @property {number} sizeMax soft upper-bound (999 = unconstrained)
  * @property {string[]} children  child node paths
@@ -14,17 +14,11 @@
  */
 
 /**
- * @typedef {Object} SpringDef
- * @property {string} author  person whose strength scales this spring
+ * @typedef {Object} PreferenceDef
+ * @property {string} author  person whose strength scales this preference
  * @property {string} from    resolved path — source node
  * @property {string} to      resolved path — destination node
- * @property {number} force   positive = attraction, negative = repulsion; default +6
- */
-
-/**
- * @typedef {Object} PinDef
- * @property {number} xf  fractional x (0–1 of canvas width)
- * @property {number} yf  fractional y (0–1 of canvas height)
+ * @property {number} force   positive = attraction, negative = avoidance; default +6
  */
 
 /**
@@ -32,8 +26,7 @@
  * @property {Record<string,NodeDef>} nodes   all nodes keyed by path
  * @property {string[]} rootNodes             top-level structural node paths
  * @property {string[]} mobileNodes           person node names (= paths for persons)
- * @property {SpringDef[]} springs
- * @property {Record<string,PinDef>} pins     person name → fractional canvas position
+ * @property {PreferenceDef[]} springs
  * @property {string[]} errors
  */
 
@@ -63,10 +56,9 @@ function parseInput(text) {
   /** @type {Record<string,NodeDef>} */ const nodes = {};
   /** @type {string[]} */ const rootNodes = [];
   /** @type {string[]} */ const mobileNodes = [];
-  /** @type {Record<string,PinDef>} */ const pins = {};
   /** @type {string[]} */ const errors = [];
   /** @type {Array<{author:string,fromRef:string,toRef:string,force:number|null}>} */
-  const rawSprings = [];
+  const rawPrefs = [];
 
   let section = null;
   /** @type {{path:string,indent:number}[]} */ const stack = [];
@@ -126,10 +118,20 @@ function parseInput(text) {
       continue;
     }
 
-    if (section === 'SPRINGS') {
+    if (section === 'PREFERENCES') {
+      // Shorthand: @Author From+Target (each sign beyond first adds ±2; + → +6, ++ → +8, - → -6, -- → -8)
+      const short = line.match(/^@(\S+)\s+(\S+?)(\++|-+)(\S+)\s*$/);
+      if (short) {
+        const signs = short[3];
+        const neg = signs[0] === '-';
+        const force = (neg ? -1 : 1) * Math.min(4 + signs.length * 2, 10);
+        rawPrefs.push({ author: short[1], fromRef: short[2], toRef: short[4], force });
+        continue;
+      }
+      // Verbose: @Author From -> To : Force
       const m = line.match(/^@(\S+)\s+(.+?)\s*->\s*(.+?)(?:\s*:\s*([-+]?[\d.]+))?\s*$/);
-      if (!m) { errors.push(`Bad spring (expected "@Author From -> To" or "@Author From -> To : Force"): ${line}`); continue; }
-      rawSprings.push({
+      if (!m) { errors.push(`Bad preference (expected "@Author From -> To" or "@Author From+Target"): ${line}`); continue; }
+      rawPrefs.push({
         author: m[1].trim(),
         fromRef: m[2].trim(),
         toRef: m[3].trim(),
@@ -137,44 +139,35 @@ function parseInput(text) {
       });
       continue;
     }
-
-    if (section === 'PINS') {
-      const parts = line.split(/\s+/);
-      if (parts.length >= 3) {
-        const xf = parseFloat(parts[1]), yf = parseFloat(parts[2]);
-        if (!isNaN(xf) && !isNaN(yf)) pins[parts[0]] = { xf, yf };
-      }
-      continue;
-    }
   }
 
-  // Auto-create any persons mentioned in springs but absent from PEOPLE.
+  // Auto-create any persons mentioned in preferences but absent from PEOPLE.
   // Only bare names (no '/') that don't suffix-match a structural node are treated as persons.
   const isStructuralRef = (ref) => {
     if (ref in nodes && !nodes[ref].mobile) return true;
     if (ref.includes('/')) return true;
     return Object.keys(nodes).some(p => p.endsWith('/' + ref) && !nodes[p].mobile);
   };
-  for (const rs of rawSprings) {
-    for (const ref of [rs.author, rs.fromRef, rs.toRef]) {
+  for (const rp of rawPrefs) {
+    for (const ref of [rp.author, rp.fromRef, rp.toRef]) {
       if (ref in nodes || isStructuralRef(ref)) continue;
       nodes[ref] = { name: ref, path: ref, mobile: true, weight: 1, sizeMin: 0, sizeMax: 999, children: [], parent: null };
       mobileNodes.push(ref);
     }
   }
 
-  // Resolve springs now that all nodes (including auto-created) are known.
-  /** @type {SpringDef[]} */ const springs = [];
-  for (const rs of rawSprings) {
-    if (!nodes[rs.author] || !nodes[rs.author].mobile) {
-      errors.push(`Spring author must be a person: "${rs.author}"`); continue;
+  // Resolve preferences now that all nodes (including auto-created) are known.
+  /** @type {PreferenceDef[]} */ const springs = [];
+  for (const rp of rawPrefs) {
+    if (!nodes[rp.author] || !nodes[rp.author].mobile) {
+      errors.push(`Preference author must be a person: "${rp.author}"`); continue;
     }
-    const from = resolveRef(rs.fromRef, nodes, errors);
-    const to   = resolveRef(rs.toRef,   nodes, errors);
+    const from = resolveRef(rp.fromRef, nodes, errors);
+    const to = resolveRef(rp.toRef, nodes, errors);
     if (from !== null && to !== null) {
-      springs.push({ author: rs.author, from, to, force: rs.force !== null ? rs.force : 6 });
+      springs.push({ author: rp.author, from, to, force: rp.force !== null ? rp.force : 6 });
     }
   }
 
-  return { nodes, rootNodes, mobileNodes, springs, pins, errors };
+  return { nodes, rootNodes, mobileNodes, springs, errors };
 }

@@ -1,287 +1,189 @@
 'use strict';
 
-const EXAMPLE = `# Team Scheduler
-# Lines starting with # are comments.
-# Roles are just areas with size:1 — same abstraction all the way down.
-# PEOPLE is optional per-person: anyone not listed defaults to strength 1.
-# Spring force defaults to +6 if omitted.
+const EXAMPLE = `# Edit preferences below and click Solve.
+# Shorthand: @Author Person+Person (+6), @Author Person++Person (+8)
+#            @Author Person-Person (-6), @Author Person--Person (-8)
 
 == PEOPLE ==
-# Name      strength (1–10) — only list if not default (1)
-Morgan      9
-Jordan      8
-Carol       7
-Alice       6
+# Name   strength (1–10) — omit to default to strength 1
+Alice   7
 
 == STRUCTURE ==
-# Name  [size:MIN-MAX]   — indentation defines parent–child
+# Name  [size:MIN-MAX]   — indentation = parent–child
 Engineering
-  AM           size:1
-  PM           size:1
-  Frontend     size:2-4
-    Lead       size:1
-  Backend      size:2-4
-    Lead       size:1
+  Frontend  size:2-4
+  Backend   size:2-3
 
-== SPRINGS ==
-# @Author  From -> To          : Force   (Force defaults to +6)
-# "Lead" is ambiguous (exists under both Frontend and Backend).
-# Use path syntax — Frontend/Lead vs Backend/Lead — to disambiguate.
-
-@Morgan  Morgan -> Engineering
-@Morgan  Morgan -> Engineering/AM   :  +8
-
-@Jordan  Jordan -> Engineering
-@Jordan  Jordan -> Engineering/PM   :  +8
-
-@Alice   Alice  -> Frontend         :  +8
-@Alice   Alice  -> Frontend/Lead    :  +6
-@Alice   Alice  -> Bob              :  +5
-@Alice   Alice  -> Morgan           :  -4
-@Alice   Alice  -> Jordan           :  -3
-
-# Bob not in PEOPLE → auto-created with strength 1
-@Bob     Bob    -> Alice
-@Bob     Bob    -> Frontend         :  +4
-
-@Carol   Carol  -> Frontend         :  +7
-@Carol   Carol  -> Alice            :  +5
-@Carol   Alice  -> Frontend/Lead    :  +7
-@Carol   Alice  -> Bob              :  +6
-
-# Dave, Frank, Eve not in PEOPLE → auto-created with strength 1
-@Dave    Dave   -> Backend          :  +7
-@Dave    Dave   -> Backend/Lead     :  +5
-
-@Frank   Frank  -> Dave
-@Frank   Frank  -> Backend          :  +6
-
-@Eve     Eve    -> Backend          :  +5
-@Eve     Eve    -> Frank
+== PREFERENCES ==
+# Verbose:   @Author From -> Area  : Force
+# Shorthand: @Author From+Person   (Force defaults to ±6)
+@Alice  Alice -> Frontend  :  +8
+@Carol  Carol+Alice
+@Carol  Carol -> Frontend  :  +7
+@Bob    Bob -> Backend
+@Dave   Dave -> Backend    :  +6
+@Dave   Dave-Carol
 `;
 
-(function main() {
-  const inputEl  = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
-  const outputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('output'));
-  const canvasEl = /** @type {HTMLCanvasElement}   */ (document.getElementById('canvas'));
-  const hintEl   = document.getElementById('hint');
-  const btnParse = /** @type {HTMLButtonElement}   */ (document.getElementById('btn-parse'));
-  const btnPause = /** @type {HTMLButtonElement}   */ (document.getElementById('btn-pause'));
-  const btnReset = /** @type {HTMLButtonElement}   */ (document.getElementById('btn-reset'));
-  const btnUnpin = /** @type {HTMLButtonElement}   */ (document.getElementById('btn-unpin'));
-  const btnCopy  = /** @type {HTMLButtonElement}   */ (document.getElementById('btn-copy'));
-  const statEl   = document.getElementById('stat');
+const LS_KEY = 'scheduler_input_v1';
+const LS_TTL = 10 * 24 * 60 * 60 * 1000; // 10 days
 
-  inputEl.value = EXAMPLE;
+function saveToStorage(text) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ v: text, ts: Date.now() })); } catch (e) { }
+}
 
-  const renderer = new Renderer(canvasEl);
+function loadFromStorage() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const { v, ts } = JSON.parse(raw);
+    if (Date.now() - ts > LS_TTL) { localStorage.removeItem(LS_KEY); return null; }
+    return v;
+  } catch (e) { return null; }
+}
 
-  /** @type {Simulation|null} */ let sim = null;
-  /** @type {ParseResult|null} */ let parsed = null;
-  /** @type {Record<string,string[]>|null} */ let lastAssignments = null;
-  let running = false;
-  let rafId = 0;
+(function () {
+  const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
+  const vizEl = /** @type {HTMLElement} */ (document.getElementById('viz-wrap'));
+  const btnSolve = /** @type {HTMLButtonElement} */ (document.getElementById('btn-solve'));
+  const btnReset = /** @type {HTMLButtonElement} */ (document.getElementById('btn-reset'));
+  const btnCopyMd = /** @type {HTMLButtonElement} */ (document.getElementById('btn-copy-md'));
+  const statEl = document.getElementById('stat');
 
-  // ── Canvas resize ──────────────────────────────────────────────
-  let autoStarted = false;
-  function resize() {
-    const wrap = /** @type {HTMLElement} */ (document.getElementById('canvas-wrap'));
-    const dpr = window.devicePixelRatio || 1;
-    const W = wrap.clientWidth, H = wrap.clientHeight;
-    if (W === 0 || H === 0) return;
-    canvasEl.width  = W * dpr;
-    canvasEl.height = H * dpr;
-    canvasEl.style.width  = W + 'px';
-    canvasEl.style.height = H + 'px';
-    if (sim) { sim.W = W; sim.H = H; }
-    if (sim && !running) renderer.draw(sim.nodes, sim.springs, lastAssignments);
-    if (!autoStarted) { autoStarted = true; startSim(); }
-  }
-  new ResizeObserver(resize).observe(document.getElementById('canvas-wrap'));
-  resize();
+  // ── State ──────────────────────────────────────────────────────
+  let currentParsed = null;
+  let currentAssignment = null;
+  let currentHappiness = null;
 
-  // ── Animation loop ─────────────────────────────────────────────
-  function loop() {
-    if (!sim || !running) return;
-    for (let i = 0; i < 3; i++) sim.step();
+  // ── Init ───────────────────────────────────────────────────────
+  inputEl.value = loadFromStorage() ?? EXAMPLE;
+  run();
 
-    if (sim.steps % 20 === 0) updateOutput();
-    renderer.draw(sim.nodes, sim.springs, lastAssignments);
+  // ── Input persistence (debounced) ──────────────────────────────
+  let saveTimer = null;
+  inputEl.addEventListener('input', () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveToStorage(inputEl.value), 800);
+  });
 
-    const converged = sim.energy < 0.15;
-    if (statEl) statEl.textContent = `step ${sim.steps} · energy ${sim.energy.toFixed(3)}${converged ? ' · converged' : ''}`;
+  // ── Buttons ────────────────────────────────────────────────────
+  btnSolve.addEventListener('click', run);
 
-    if (converged) {
-      updateOutput();
-      renderer.draw(sim.nodes, sim.springs, lastAssignments);
-      running = false;
-      syncPauseBtn();
-    } else {
-      rafId = requestAnimationFrame(loop);
-    }
-  }
+  btnReset.addEventListener('click', () => {
+    localStorage.removeItem(LS_KEY);
+    inputEl.value = EXAMPLE;
+    run();
+  });
 
-  function updateOutput() {
-    if (!sim || !parsed) return;
-    lastAssignments = computeAssignments(sim.nodes, sim.nodeMap, parsed.nodes, parsed.mobileNodes, parsed.springs);
-    outputEl.value = formatAssignments(lastAssignments, parsed, sim.nodeMap);
-  }
+  btnCopyMd.addEventListener('click', copyMd);
 
-  // ── Start / reset ───────────────────────────────────────────────
-  function startSim() {
-    cancelAnimationFrame(rafId);
-    parsed = parseInput(inputEl.value);
+  // ── Drag-and-drop (event delegation on stable container) ───────
+  vizEl.addEventListener('dragstart', e => {
+    const card = /** @type {HTMLElement} */ (e.target).closest('[data-person]');
+    if (!card) return;
+    e.dataTransfer.setData('text/plain', card.dataset.person);
+    e.dataTransfer.effectAllowed = 'move';
+  });
 
-    let preamble = '';
-    if (parsed.errors.length > 0) {
-      preamble = '== PARSE ERRORS ==\n' + parsed.errors.map(e => '  ' + e).join('\n') + '\n\n';
-    }
-    if (parsed.mobileNodes.length === 0 || parsed.rootNodes.length === 0) {
-      outputEl.value = preamble + 'No people or structural nodes found. Check your input.';
+  vizEl.addEventListener('dragover', e => {
+    const leaf = /** @type {HTMLElement} */ (e.target).closest('[data-area]');
+    if (!leaf) return;
+    e.preventDefault();
+    leaf.classList.add('drag-over');
+  });
+
+  vizEl.addEventListener('dragleave', e => {
+    const leaf = /** @type {HTMLElement} */ (e.target).closest('[data-area]');
+    if (leaf) leaf.classList.remove('drag-over');
+  });
+
+  vizEl.addEventListener('drop', e => {
+    const leaf = /** @type {HTMLElement} */ (e.target).closest('[data-area]');
+    if (!leaf) return;
+    e.preventDefault();
+    leaf.classList.remove('drag-over');
+    const person = e.dataTransfer.getData('text/plain');
+    if (!person || !currentParsed || !currentAssignment) return;
+    currentAssignment[person] = leaf.dataset.area;
+    currentHappiness = computeHappiness(currentParsed, currentAssignment);
+    renderState();
+  });
+
+  // ── Core ───────────────────────────────────────────────────────
+  function run() {
+    saveToStorage(inputEl.value);
+    const parsed = parseInput(inputEl.value);
+    currentParsed = parsed;
+
+    if (parsed.mobileNodes.length === 0 && parsed.rootNodes.length === 0) {
+      vizEl.innerHTML = '<div class="viz-msg">Add people and structure to get started.</div>';
       return;
     }
 
-    const dpr = window.devicePixelRatio || 1;
-    const W = canvasEl.width / dpr, H = canvasEl.height / dpr;
-    const { nodes, springs, nodeMap } = buildSim(parsed, W, H);
-    sim = new Simulation(nodes, springs);
-    sim.W = W; sim.H = H;
-
-    lastAssignments = null;
-    if (preamble) outputEl.value = preamble;
-    running = true;
-    btnPause.disabled = false;
-    btnReset.disabled = false;
-    if (hintEl) hintEl.style.display = 'none';
-    syncUnpinBtn();
-    syncPauseBtn();
-    rafId = requestAnimationFrame(loop);
-  }
-
-  function syncPauseBtn() {
-    btnPause.textContent = running ? 'Pause' : 'Resume';
-    btnPause.className   = running ? 'btn go' : 'btn';
-  }
-
-  function syncUnpinBtn() {
-    const hasPins = sim && sim.nodes.some(n => n.pinned);
-    btnUnpin.style.display = hasPins ? '' : 'none';
-  }
-
-  btnParse.addEventListener('click', startSim);
-  btnReset.addEventListener('click', startSim);
-
-  btnPause.addEventListener('click', () => {
-    if (!sim) return;
-    running = !running;
-    syncPauseBtn();
-    if (running) { rafId = requestAnimationFrame(loop); }
-    else { updateOutput(); }
-  });
-
-  btnUnpin.addEventListener('click', () => {
-    if (!sim) return;
-    for (const n of sim.nodes) {
-      if (n.pinned) { n.pinned = false; n.fixed = false; n.vx = 0; n.vy = 0; }
+    let errHtml = '';
+    if (parsed.errors.length) {
+      errHtml = '<div class="viz-errors">' +
+        parsed.errors.map(e => `<div class="viz-error">⚠ ${escHtml(e)}</div>`).join('') +
+        '</div>';
+      if (parsed.mobileNodes.length === 0 || parsed.rootNodes.length === 0) {
+        vizEl.innerHTML = errHtml; return;
+      }
     }
-    removePinsFromInput();
-    syncUnpinBtn();
-    updateOutput();
-    renderer.draw(sim.nodes, sim.springs, lastAssignments);
-    if (!running) { running = true; syncPauseBtn(); rafId = requestAnimationFrame(loop); }
-  });
 
-  btnCopy.addEventListener('click', () => {
-    if (!outputEl.value) return;
-    navigator.clipboard.writeText(outputEl.value).then(() => {
-      btnCopy.textContent = 'Copied!';
-      setTimeout(() => btnCopy.textContent = 'Copy', 1500);
+    const result = solveAssignments(parsed);
+    currentAssignment = result.assignment;
+    currentHappiness = result.happiness;
+
+    renderState();
+    if (errHtml) vizEl.insertAdjacentHTML('afterbegin', errHtml);
+
+    const nPeople = parsed.mobileNodes.length;
+    const nAreas = Object.keys(parsed.nodes).filter(p => !parsed.nodes[p].mobile).length;
+    if (statEl) statEl.textContent = `${nPeople} people · ${nAreas} areas`;
+  }
+
+  function renderState() {
+    if (!currentParsed || !currentAssignment) return;
+    renderAssignment(currentParsed, { assignment: currentAssignment, happiness: currentHappiness }, vizEl);
+  }
+
+  // ── Export ─────────────────────────────────────────────────────
+  function copyMd() {
+    if (!currentParsed || !currentAssignment) return;
+
+    const { nodes, rootNodes } = currentParsed;
+    const lines = [];
+
+    function walk(path, depth) {
+      const nd = nodes[path];
+      const hashes = '#'.repeat(depth + 1);
+      lines.push(`${hashes} ${nd.name}`);
+      if (nd.children.length) {
+        for (const child of nd.children) walk(child, depth + 1);
+      } else {
+        // leaf — list assigned people
+        const people = Object.entries(currentAssignment)
+          .filter(([, a]) => a === path)
+          .map(([n]) => n);
+        if (people.length) {
+          for (const name of people) lines.push(`- ${name}`);
+        } else {
+          lines.push('- —');
+        }
+      }
+      lines.push('');
+    }
+
+    for (const root of rootNodes) walk(root, 1);
+
+    navigator.clipboard.writeText(lines.join('\n').trimEnd() + '\n').then(() => {
+      const orig = btnCopyMd.textContent;
+      btnCopyMd.textContent = 'Copied!';
+      setTimeout(() => { btnCopyMd.textContent = orig; }, 1500);
     });
-  });
-
-  // ── Pin serialization ───────────────────────────────────────────
-  function writePinsToInput() {
-    if (!sim) return;
-    const W = sim.W, H = sim.H;
-    const pinEntries = sim.nodes
-      .filter(n => n.pinned)
-      .map(n => `${n.label}  ${(n.x / W).toFixed(4)}  ${(n.y / H).toFixed(4)}`);
-
-    const filtered = [];
-    let inPins = false;
-    for (const line of inputEl.value.split('\n')) {
-      if (/^==\s*PINS\s*==/i.test(line)) { inPins = true; continue; }
-      if (inPins && /^==\s*\S/.test(line)) inPins = false;
-      if (!inPins) filtered.push(line);
-    }
-    while (filtered.length > 0 && !filtered[filtered.length - 1].trim()) filtered.pop();
-    if (pinEntries.length > 0) filtered.push('', '== PINS ==', ...pinEntries);
-    inputEl.value = filtered.join('\n');
   }
 
-  function removePinsFromInput() {
-    const filtered = [];
-    let inPins = false;
-    for (const line of inputEl.value.split('\n')) {
-      if (/^==\s*PINS\s*==/i.test(line)) { inPins = true; continue; }
-      if (inPins && /^==\s*\S/.test(line)) inPins = false;
-      if (!inPins) filtered.push(line);
-    }
-    while (filtered.length > 0 && !filtered[filtered.length - 1].trim()) filtered.pop();
-    inputEl.value = filtered.join('\n');
+  function escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
-
-  // ── Drag / pin interaction ──────────────────────────────────────
-  /** @type {PhysNode|null} */ let dragging = null;
-  let dragDx = 0, dragDy = 0, dragStartX = 0, dragStartY = 0;
-
-  canvasEl.addEventListener('mousedown', e => {
-    if (!sim) return;
-    const rect = canvasEl.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    for (const n of sim.nodes) {
-      const dx = mx - n.x, dy = my - n.y;
-      if (Math.sqrt(dx * dx + dy * dy) <= n.radius + 4) {
-        dragging = n; dragDx = dx; dragDy = dy;
-        dragStartX = n.x; dragStartY = n.y;
-        canvasEl.style.cursor = 'grabbing';
-        break;
-      }
-    }
-  });
-
-  window.addEventListener('mousemove', e => {
-    if (!dragging || !sim) return;
-    const rect = canvasEl.getBoundingClientRect();
-    dragging.x = e.clientX - rect.left - dragDx;
-    dragging.y = e.clientY - rect.top  - dragDy;
-    dragging.vx = 0; dragging.vy = 0;
-    if (!running) renderer.draw(sim.nodes, sim.springs, lastAssignments);
-  });
-
-  window.addEventListener('mouseup', () => {
-    if (!dragging || !sim) { dragging = null; canvasEl.style.cursor = 'default'; return; }
-    const moved = Math.hypot(dragging.x - dragStartX, dragging.y - dragStartY);
-
-    if (dragging.kind === 'person') {
-      if (moved > 6) {
-        dragging.pinned = true; dragging.fixed = true;
-        dragging.vx = 0; dragging.vy = 0;
-        writePinsToInput();
-        syncUnpinBtn();
-        updateOutput();
-        if (!running) renderer.draw(sim.nodes, sim.springs, lastAssignments);
-      } else if (dragging.pinned) {
-        dragging.pinned = false; dragging.fixed = false;
-        dragging.vx = 0; dragging.vy = 0;
-        writePinsToInput();
-        syncUnpinBtn();
-        updateOutput();
-        if (!running) { running = true; syncPauseBtn(); rafId = requestAnimationFrame(loop); }
-      }
-    }
-
-    dragging = null;
-    canvasEl.style.cursor = 'default';
-  });
 })();

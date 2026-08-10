@@ -1,173 +1,97 @@
 'use strict';
 
-class Renderer {
-  /** @param {HTMLCanvasElement} canvas */
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.ctx = /** @type {CanvasRenderingContext2D} */ (canvas.getContext('2d'));
+function isInOrUnder(area, targetPath, nodes) {
+  let cur = area;
+  while (cur) {
+    if (cur === targetPath) return true;
+    cur = nodes[cur] ? nodes[cur].parent : null;
+  }
+  return false;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildTooltipHtml(name, springs, nodes, assignment) {
+  const authored = springs.filter(s => s.author === name);
+  if (!authored.length) return `<div class="tt-row muted">${esc(name)} — no preferences</div>`;
+
+  const myArea = assignment[name];
+  return authored.map(s => {
+    let satisfied = false;
+    const isArea = nodes[s.to] && !nodes[s.to].mobile;
+    if (isArea) {
+      satisfied = s.force > 0 && !!myArea && isInOrUnder(myArea, s.to, nodes);
+    } else {
+      const toArea = assignment[s.to];
+      satisfied = s.force > 0 ? (toArea !== undefined && toArea === myArea) : (toArea !== myArea);
+    }
+
+    const sign = s.force > 0 ? '+' : '';
+    const rel  = isArea ? `→ ${s.to.split('/').pop()}` : (s.force > 0 ? `↔ ${s.to}` : `≠ ${s.to}`);
+    const cls  = satisfied ? 'ok' : 'bad';
+    const tick = satisfied ? '✓' : '✗';
+    return `<div class="tt-row ${cls}">${tick} ${sign}${s.force} ${esc(rel)}</div>`;
+  }).join('');
+}
+
+/**
+ * Render the assignment result as a nested HTML card tree.
+ * Person cards are draggable; leaf areas have data-area for drop targets.
+ *
+ * @param {ParseResult} parsed
+ * @param {{ assignment: Record<string,string>, happiness: Record<string,number> }} result
+ * @param {HTMLElement} container
+ */
+function renderAssignment(parsed, result, container) {
+  const { nodes, rootNodes, springs } = parsed;
+  const { assignment, happiness } = result;
+
+  function countSubtree(path) {
+    const direct = Object.values(assignment).filter(a => a === path).length;
+    return direct + (nodes[path].children || []).reduce((s, c) => s + countSubtree(c), 0);
   }
 
-  /**
-   * @param {PhysNode[]} nodes
-   * @param {PhysSpring[]} springs
-   * @param {Record<string,string[]>|null} assignments  groupPath → [personNames]
-   */
-  draw(nodes, springs, assignments) {
-    const { ctx } = this;
-    const dpr = window.devicePixelRatio || 1;
-    const W = this.canvas.width / dpr;
-    const H = this.canvas.height / dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+  function renderNode(path) {
+    const nd = nodes[path];
+    const isLeaf = nd.children.length === 0;
+    const total = countSubtree(path);
+    const direct = Object.entries(assignment).filter(([, a]) => a === path).map(([n]) => n);
 
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(0, 0, W, H);
+    const sizeHtml = nd.sizeMax < 999
+      ? `<span class="a-size">${nd.sizeMin === nd.sizeMax ? nd.sizeMin : nd.sizeMin + '–' + nd.sizeMax}</span>`
+      : '';
 
-    /** @type {Record<string,PhysNode>} */ const nodeMap = {};
-    nodes.forEach(n => nodeMap[n.id] = n);
-    const groups  = nodes.filter(n => n.kind === 'group');
-    const persons = nodes.filter(n => n.kind === 'person');
+    const capClass = nd.sizeMax < 999 && total > nd.sizeMax ? ' cap-over'
+                   : nd.sizeMin > 0  && total < nd.sizeMin ? ' cap-under' : '';
 
-    // Hierarchy edges (parent → child, dashed)
-    for (const g of groups) {
-      for (const childPath of g.meta.children) {
-        const child = nodeMap[`g:${childPath}`];
-        if (!child) continue;
-        ctx.beginPath();
-        ctx.moveTo(g.x, g.y);
-        ctx.lineTo(child.x, child.y);
-        ctx.strokeStyle = g.color + '44';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 5]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
+    const childrenHtml = nd.children.map(c => renderNode(c)).join('');
 
-    // Group nodes
-    for (const g of groups) {
-      const nd = g.meta;
-      const isLeaf = nd.children.length === 0;
-      const hasSize = nd.sizeMax < 999;
+    const peopleHtml = direct.map(name => {
+      const hap = happiness[name] ?? 1;
+      const pct = Math.round(hap * 100);
+      const color = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
+      const ttHtml = buildTooltipHtml(name, springs, nodes, assignment);
+      return `<div class="p-card" draggable="true" data-person="${esc(name)}" style="--hap:${pct}%;--hc:${color}">
+        <div class="p-fill"></div>
+        <div class="tt">${ttHtml}</div>
+        <span class="p-name">${esc(name)}</span>
+        <span class="p-pct">${pct}%</span>
+      </div>`;
+    }).join('');
 
-      let ringColor = g.color;
-      if (assignments && isLeaf && hasSize) {
-        const count = (assignments[nd.path] || []).length;
-        if      (count < nd.sizeMin) ringColor = '#f85149';
-        else if (count > nd.sizeMax) ringColor = '#e3b341';
-        else                         ringColor = '#3fb950';
-      }
+    const emptyHtml = isLeaf && direct.length === 0 ? '<div class="a-empty">— no assignment here</div>' : '';
+    const areaAttr  = isLeaf ? ` data-area="${esc(path)}"` : '';
 
-      const grd = ctx.createRadialGradient(g.x, g.y, 0, g.x, g.y, g.radius * 1.4);
-      grd.addColorStop(0, g.color + (isLeaf ? '40' : '22'));
-      grd.addColorStop(1, g.color + '00');
-      ctx.beginPath();
-      ctx.arc(g.x, g.y, g.radius * 1.4, 0, 2 * Math.PI);
-      ctx.fillStyle = grd;
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(g.x, g.y, g.radius, 0, 2 * Math.PI);
-      ctx.strokeStyle = ringColor + (isLeaf ? 'cc' : '77');
-      ctx.lineWidth = isLeaf ? 2 : 1;
-      ctx.setLineDash(isLeaf ? [] : [5, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#e0e0e0';
-      ctx.font = `${isLeaf ? 'bold ' : ''}11px monospace`;
-      ctx.fillText(g.label, g.x, g.y);
-
-      if (isLeaf && hasSize && assignments) {
-        const count = (assignments[nd.path] || []).length;
-        ctx.fillStyle = ringColor + 'bb';
-        ctx.font = '9px monospace';
-        ctx.fillText(`${count}/${nd.sizeMax}`, g.x, g.y + g.radius + 11);
-      }
-    }
-
-    // Attraction springs only (skip background k<0.001 and repulsion rest>500)
-    for (const s of springs) {
-      if (s.k < 0.001 || s.rest > 500) continue;
-      const a = nodeMap[s.a], b = nodeMap[s.b];
-      if (!a || !b) continue;
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const tension = Math.min(1, Math.abs(dist - s.rest) * s.k * 30);
-      const alpha = 0.06 + tension * 0.35;
-      ctx.strokeStyle = b.kind === 'group'
-        ? `rgba(88,166,255,${alpha})`
-        : `rgba(200,200,200,${alpha})`;
-      ctx.lineWidth = 0.5 + s.k * 500;
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-    }
-
-    // Tint persons by assigned group; proximity fallback during sim
-    /** @type {Record<string,PhysNode|null>} */ const nearestGroup = {};
-    if (assignments) {
-      for (const [gPath, members] of Object.entries(assignments)) {
-        const gNode = nodeMap[`g:${gPath}`];
-        if (!gNode) continue;
-        for (const m of members) nearestGroup[`p:${m}`] = gNode;
-      }
-    }
-    const leafNodes = groups.filter(g => g.meta.children.length === 0);
-    for (const p of persons) {
-      if (nearestGroup[p.id]) continue;
-      let best = null, bestDist = Infinity;
-      for (const g of leafNodes) {
-        const dx = p.x - g.x, dy = p.y - g.y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < bestDist) { bestDist = d; best = g; }
-      }
-      nearestGroup[p.id] = best;
-    }
-
-    // Person nodes
-    for (const p of persons) {
-      const tintNode = nearestGroup[p.id];
-      const tintColor = tintNode ? tintNode.color : '#444';
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y + 2, p.radius, 0, 2 * Math.PI);
-      ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.radius, 0, 2 * Math.PI);
-      ctx.fillStyle = tintColor + '88';
-      ctx.fill();
-      ctx.fillStyle = p.color + '99';
-      ctx.fill();
-
-      ctx.strokeStyle = p.pinned ? '#e3b341' : p.color + 'dd';
-      ctx.lineWidth = p.pinned ? 2 : 1.5;
-      ctx.stroke();
-
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 8px monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(p.label.slice(0, 2).toUpperCase(), p.x, p.y);
-
-      ctx.fillStyle = '#c9d1d9bb';
-      ctx.font = '9px monospace';
-      ctx.fillText(p.label, p.x, p.y + p.radius + 9);
-
-      if (p.pinned) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.radius + 5, 0, 2 * Math.PI);
-        ctx.strokeStyle = '#e3b341cc';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([3, 3]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
+    return `<div class="a-node ${isLeaf ? 'a-leaf' : 'a-par'}${capClass}"${areaAttr}>
+      <div class="a-head">
+        <span class="a-name">${esc(nd.name)}</span>${sizeHtml}<span class="a-cnt">${total || ''}</span>
+      </div>
+      ${nd.children.length ? `<div class="a-kids">${childrenHtml}</div>` : ''}
+      ${peopleHtml ? `<div class="p-list">${peopleHtml}</div>` : ''}${emptyHtml}
+    </div>`;
   }
+
+  container.innerHTML = `<div class="viz-root">${rootNodes.map(renderNode).join('')}</div>`;
 }
