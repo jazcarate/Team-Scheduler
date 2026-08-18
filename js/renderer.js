@@ -23,7 +23,7 @@ function esc(s) {
  * @param {HTMLElement} container
  */
 function renderAssignment(parsed, result, container) {
-  const { nodes, rootNodes, springs } = parsed;
+  const { nodes, rootNodes } = parsed;
   const { assignment, happiness, pins = {} } = result;
 
   function countSubtree(path) {

@@ -20,13 +20,15 @@ Dave prefers Backend
 Dave avoids Carol
 `;
 
-const LS_KEY = 'scheduler_v2';
+const LS_KEY = 'scheduler_v1';
 const LS_TTL = 10 * 24 * 60 * 60 * 1000;
 
 function saveToStorage(text, pins) {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify({ v: text, pins: pins || {}, ts: Date.now() }));
-  } catch (e) { }
+  } catch (e) {
+    console.warn("Could not store to local storage", e);
+  }
 }
 
 function loadFromStorage() {
@@ -40,21 +42,21 @@ function loadFromStorage() {
 }
 
 (function () {
-  const inputEl   = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
-  const vizEl     = /** @type {HTMLElement} */ (document.getElementById('viz-wrap'));
+  const inputEl = /** @type {HTMLTextAreaElement} */ (document.getElementById('input'));
+  const vizEl = /** @type {HTMLElement} */ (document.getElementById('viz-wrap'));
   const infoBarEl = /** @type {HTMLElement} */ (document.getElementById('info-bar'));
-  const btnSolve  = /** @type {HTMLButtonElement} */ (document.getElementById('btn-solve'));
-  const btnReset  = /** @type {HTMLButtonElement} */ (document.getElementById('btn-reset'));
-  const btnUndo   = /** @type {HTMLButtonElement} */ (document.getElementById('btn-undo'));
-  const btnRedo   = /** @type {HTMLButtonElement} */ (document.getElementById('btn-redo'));
+  const btnSolve = /** @type {HTMLButtonElement} */ (document.getElementById('btn-solve'));
+  const btnReset = /** @type {HTMLButtonElement} */ (document.getElementById('btn-reset'));
+  const btnUndo = /** @type {HTMLButtonElement} */ (document.getElementById('btn-undo'));
+  const btnRedo = /** @type {HTMLButtonElement} */ (document.getElementById('btn-redo'));
   const btnCopyMd = /** @type {HTMLButtonElement} */ (document.getElementById('btn-copy-md'));
-  const statEl    = document.getElementById('stat');
+  const statEl = document.getElementById('stat');
 
   // ── State ──────────────────────────────────────────────────────
-  let currentParsed     = null;
+  let currentParsed = null;
   let currentAssignment = null;
-  let currentHappiness  = null;
-  let currentPins       = {};
+  let currentHappiness = null;
+  let currentPins = {};
 
   // ── Undo / Redo ────────────────────────────────────────────────
   /** @type {Array<{assignment:object,pins:object,happiness:object}>} */
@@ -64,8 +66,8 @@ function loadFromStorage() {
   function snapshotState() {
     return {
       assignment: Object.assign({}, currentAssignment),
-      pins:       Object.assign({}, currentPins),
-      happiness:  Object.assign({}, currentHappiness),
+      pins: Object.assign({}, currentPins),
+      happiness: Object.assign({}, currentHappiness),
     };
   }
 
@@ -78,8 +80,8 @@ function loadFromStorage() {
 
   function applySnapshot(snap) {
     currentAssignment = Object.assign({}, snap.assignment);
-    currentPins       = Object.assign({}, snap.pins);
-    currentHappiness  = Object.assign({}, snap.happiness);
+    currentPins = Object.assign({}, snap.pins);
+    currentHappiness = Object.assign({}, snap.happiness);
     renderState();
     syncUndoButtons();
   }
@@ -104,7 +106,7 @@ function loadFromStorage() {
   // ── Init ───────────────────────────────────────────────────────
   const stored = loadFromStorage();
   inputEl.value = stored ? stored.text : EXAMPLE;
-  currentPins   = stored ? stored.pins : {};
+  currentPins = stored ? stored.pins : {};
   run();
   syncUndoButtons();
 
@@ -116,7 +118,17 @@ function loadFromStorage() {
   });
 
   // ── Buttons ────────────────────────────────────────────────────
-  btnSolve.addEventListener('click', () => { pushUndo(); run(); });
+  btnSolve.addEventListener('click', () => {
+    pushUndo();
+    btnSolve.disabled = true;
+    btnSolve.textContent = 'Solving…';
+    // Let the DOM repaint before the synchronous solve blocks the thread
+    requestAnimationFrame(() => setTimeout(() => {
+      run();
+      btnSolve.disabled = false;
+      btnSolve.textContent = 'Solve';
+    }, 0));
+  });
 
   btnReset.addEventListener('click', () => {
     pushUndo();
@@ -176,7 +188,7 @@ function loadFromStorage() {
 
   vizEl.addEventListener('mouseout', e => {
     const card = /** @type {HTMLElement} */ (e.target).closest('[data-person]');
-    const to   = /** @type {HTMLElement} */ (e.relatedTarget);
+    const to = /** @type {HTMLElement} */ (e.relatedTarget);
     if (!card) return;
     if (!to || !card.contains(to)) hideInfoBar();
   });
@@ -219,23 +231,23 @@ function loadFromStorage() {
 
   function hlClass(force) {
     if (force >= 99) return 'drag-req';
-    if (force >= 8)  return 'drag-pref-2';
-    if (force > 0)   return 'drag-pref-1';
+    if (force >= 8) return 'drag-pref-2';
+    if (force > 0) return 'drag-pref-1';
     if (force <= -8) return 'drag-avd-2';
     return 'drag-avd-1';
   }
 
   function hlBadgeClass(force) {
     if (force >= 99) return 'pref-badge-req';
-    if (force >= 8)  return 'pref-badge-2';
-    if (force > 0)   return 'pref-badge-1';
+    if (force >= 8) return 'pref-badge-2';
+    if (force > 0) return 'pref-badge-1';
     if (force <= -8) return 'pref-badge-n2';
     return 'pref-badge-n1';
   }
 
   function highlightPreferences(person) {
     if (!currentParsed || !currentAssignment) return;
-    const { nodes, springs } = currentParsed;
+    const { nodes, prefs } = currentParsed;
 
     // Strongest preference per area element
     /** @type {Map<Element,{force:number,verb:string,label:string}>} */
@@ -260,24 +272,24 @@ function loadFromStorage() {
     }
 
     // Person's own preferences
-    for (const s of springs) {
+    for (const s of prefs) {
       if (s.from !== person) continue;
-      const nd = nodes[s.to]; if (!nd) continue;
+      const nd = nodes[s.to[0]]; if (!nd) continue;
       if (!nd.mobile) {
-        // Area spring: highlight area
-        addAreaHL(s.to, s.force, s.verb, s.verb);
+        // Area spring: highlight every matching area (multi-target)
+        for (const t of s.to) addAreaHL(t, s.force, s.verb, s.verb);
       } else {
         // Person spring: highlight that person's card directly
-        addPersonHL(s.to, s.force);
+        addPersonHL(s.to[0], s.force);
         // Also highlight their current area so you know where to drag
-        const toArea = currentAssignment[s.to];
-        if (toArea) addAreaHL(toArea, s.force, s.verb, `${s.verb} ${s.to}`);
+        const toArea = currentAssignment[s.to[0]];
+        if (toArea) addAreaHL(toArea, s.force, s.verb, `${s.verb} ${s.toRef}`);
       }
     }
 
     // Others who prefer to be near this person — highlight their cards + area
-    for (const s of springs) {
-      if (s.to !== person || s.force <= 0) continue;
+    for (const s of prefs) {
+      if (!s.to.includes(person) || s.force <= 0) continue;
       if (!nodes[s.from] || !nodes[s.from].mobile) continue;
       addPersonHL(s.from, s.force);
       const fromArea = currentAssignment[s.from];
@@ -307,7 +319,7 @@ function loadFromStorage() {
     }
   }
 
-  const HL_CLASSES = ['drag-pref-1','drag-pref-2','drag-req','drag-avd-1','drag-avd-2','drag-source'];
+  const HL_CLASSES = ['drag-pref-1', 'drag-pref-2', 'drag-req', 'drag-avd-1', 'drag-avd-2', 'drag-source'];
 
   function clearDragHighlights() {
     vizEl.querySelectorAll(HL_CLASSES.map(c => `.${c}`).join(',')).forEach(el =>
@@ -317,9 +329,9 @@ function loadFromStorage() {
 
   // ── Info bar ───────────────────────────────────────────────────
   function showInfoBar(person) {
-    const { nodes, springs } = currentParsed;
-    const myArea   = currentAssignment[person];
-    const relevant = springs.filter(s => s.from === person);
+    const { nodes, prefs } = currentParsed;
+    const myArea = currentAssignment[person];
+    const relevant = prefs.filter(s => s.from === person);
     const isPinned = person in currentPins;
 
     let html = `<span class="ib-name">${escHtml(person)}</span>`;
@@ -329,28 +341,27 @@ function loadFromStorage() {
       html += `<span class="ib-none">no preferences</span>`;
     } else {
       for (const s of relevant) {
-        const isArea = nodes[s.to] && !nodes[s.to].mobile;
+        const isArea = nodes[s.to[0]] && !nodes[s.to[0]].mobile;
         let cls, label;
         if (isArea) {
-          const sat = s.force > 0
-            ? (!!myArea && isInOrUnder(myArea, s.to, nodes))
-            : (!!myArea && !isInOrUnder(myArea, s.to, nodes));
-          cls   = sat ? 'ok' : 'bad';
-          label = `${s.verb} ${s.to}`;
+          const inAny = !!myArea && s.to.some(t => isInOrUnder(myArea, t, nodes));
+          cls = (s.force > 0 ? inAny : !inAny) ? 'ok' : 'bad';
+          // Single target → show full resolved path; multi-target → show original ref
+          label = `${s.verb} ${s.to.length === 1 ? s.to[0] : s.toRef}`;
         } else {
-          const toArea = currentAssignment[s.to];
+          const toArea = currentAssignment[s.to[0]];
           if (s.force > 0) {
             const cl = (myArea && toArea) ? closeness(myArea, toArea, nodes) : 0;
-            if      (cl >= 1) { cls = 'ok';      label = `${s.verb} ${s.to}`; }
-            else if (cl >  0) {
+            if (cl >= 1) { cls = 'ok'; label = `${s.verb} ${s.toRef}`; }
+            else if (cl > 0) {
               const lca = lcaPath(myArea, toArea, nodes);
-              cls   = 'partial';
-              label = `${s.verb} ${s.to}` + (lca ? ` via ${lca}` : '');
+              cls = 'partial';
+              label = `${s.verb} ${s.toRef}` + (lca ? ` via ${lca}` : '');
             }
-            else              { cls = 'bad';     label = `${s.verb} ${s.to}`; }
+            else { cls = 'bad'; label = `${s.verb} ${s.toRef}`; }
           } else {
-            cls   = (toArea !== myArea) ? 'ok' : 'bad';
-            label = `${s.verb} ${s.to}`;
+            cls = (toArea !== myArea) ? 'ok' : 'bad';
+            label = `${s.verb} ${s.toRef}`;
           }
         }
         const tick = cls === 'ok' ? '✓' : cls === 'partial' ? '~' : '✗';
@@ -398,14 +409,11 @@ function loadFromStorage() {
 
     const result = solveAssignments(parsed, currentPins);
     currentAssignment = Object.assign({}, result.assignment);
-    currentHappiness  = result.happiness;
+    currentHappiness = result.happiness;
 
     renderState();
     if (errHtml) vizEl.insertAdjacentHTML('afterbegin', errHtml);
 
-    const nPeople = parsed.mobileNodes.length;
-    const nAreas  = Object.keys(parsed.nodes).filter(p => !parsed.nodes[p].mobile).length;
-    if (statEl) statEl.textContent = `${nPeople} people · ${nAreas} areas`;
   }
 
   function renderState() {
@@ -415,6 +423,11 @@ function loadFromStorage() {
       { assignment: currentAssignment, happiness: currentHappiness, pins: currentPins },
       vizEl,
     );
+    if (statEl && currentHappiness) {
+      const vals = Object.values(currentHappiness);
+      const avg = vals.length ? vals.reduce((s, h) => s + h, 0) / vals.length : 0;
+      statEl.textContent = `Total happiness: ${Math.round(avg * 100)}%`;
+    }
   }
 
   // ── Export ─────────────────────────────────────────────────────

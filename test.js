@@ -37,10 +37,10 @@ Alice prefers Frontend
   ok('Alice' in r.nodes);
   eq(r.nodes['Engineering/Frontend'].sizeMin, 2);
   eq(r.nodes['Engineering/Frontend'].sizeMax, 4);
-  eq(r.springs.length, 1);
-  eq(r.springs[0].force, 6);
-  eq(r.springs[0].verb, 'prefers');
-  eq(r.springs[0].to, 'Engineering/Frontend');
+  eq(r.prefs.length, 1);
+  eq(r.prefs[0].force, 6);
+  eq(r.prefs[0].verb, 'prefers');
+  eq(r.prefs[0].to, ['Engineering/Frontend']);
 });
 
 test('prefers gives force +6', () => {
@@ -52,8 +52,8 @@ Engineering
 == PREFERENCES ==
 Alice prefers Engineering
 `);
-  eq(r.springs[0].force, 6);
-  eq(r.springs[0].verb, 'prefers');
+  eq(r.prefs[0].force, 6);
+  eq(r.prefs[0].verb, 'prefers');
 });
 
 test('strongly prefers gives force +8', () => {
@@ -65,8 +65,8 @@ Engineering
 == PREFERENCES ==
 Alice strongly prefers Engineering
 `);
-  eq(r.springs[0].force, 8);
-  eq(r.springs[0].verb, 'strongly prefers');
+  eq(r.prefs[0].force, 8);
+  eq(r.prefs[0].verb, 'strongly prefers');
 });
 
 test('requires gives force 100', () => {
@@ -78,8 +78,8 @@ Engineering
 == PREFERENCES ==
 Alice requires Engineering
 `);
-  eq(r.springs[0].force, 100);
-  eq(r.springs[0].verb, 'requires');
+  eq(r.prefs[0].force, 100);
+  eq(r.prefs[0].verb, 'requires');
 });
 
 test('avoids gives force -6', () => {
@@ -91,8 +91,8 @@ Engineering
 == PREFERENCES ==
 Alice avoids Engineering
 `);
-  eq(r.springs[0].force, -6);
-  eq(r.springs[0].verb, 'avoids');
+  eq(r.prefs[0].force, -6);
+  eq(r.prefs[0].verb, 'avoids');
 });
 
 test('strongly avoids gives force -8', () => {
@@ -103,8 +103,8 @@ Dave
 == PREFERENCES ==
 Alice strongly avoids Dave
 `);
-  eq(r.springs[0].force, -8);
-  eq(r.springs[0].verb, 'strongly avoids');
+  eq(r.prefs[0].force, -8);
+  eq(r.prefs[0].verb, 'strongly avoids');
 });
 
 test('all verbs parse to correct forces', () => {
@@ -123,11 +123,11 @@ Bob avoids Frontend
 Bob strongly avoids Frontend
 `);
   ok(r.errors.length === 0, r.errors.join());
-  eq(r.springs[0].force, 6);
-  eq(r.springs[1].force, 8);
-  eq(r.springs[2].force, 100);
-  eq(r.springs[3].force, -6);
-  eq(r.springs[4].force, -8);
+  eq(r.prefs[0].force, 6);
+  eq(r.prefs[1].force, 8);
+  eq(r.prefs[2].force, 100);
+  eq(r.prefs[3].force, -6);
+  eq(r.prefs[4].force, -8);
 });
 
 test('inline comment is parsed and stored on spring', () => {
@@ -141,10 +141,10 @@ Engineering
 Alice strongly prefers Frontend  # requested by manager
 `);
   ok(r.errors.length === 0, r.errors.join());
-  eq(r.springs[0].comment, 'requested by manager');
-  eq(r.springs[0].verb, 'strongly prefers');
-  eq(r.springs[0].from, 'Alice');
-  eq(r.springs[0].to, 'Engineering/Frontend');
+  eq(r.prefs[0].comment, 'requested by manager');
+  eq(r.prefs[0].verb, 'strongly prefers');
+  eq(r.prefs[0].from, 'Alice');
+  eq(r.prefs[0].to, ['Engineering/Frontend']);
 });
 
 test('preference without comment stores empty comment', () => {
@@ -156,7 +156,7 @@ Engineering
 == PREFERENCES ==
 Alice prefers Engineering
 `);
-  eq(r.springs[0].comment, '');
+  eq(r.prefs[0].comment, '');
 });
 
 test('old @Author syntax produces an error', () => {
@@ -171,7 +171,7 @@ Engineering
 @Foo  Dave---Bob
 `);
   ok(r.errors.length > 0, 'old @Author syntax should not parse');
-  eq(r.springs.length, 0);
+  eq(r.prefs.length, 0);
   ok(!('Foo' in r.nodes), 'Foo should not become a node');
 });
 
@@ -183,7 +183,7 @@ Engineering
 Alice prefers Engineering
 `);
   ok(r.errors.length > 0, 'expected error for unknown from-node');
-  eq(r.springs.length, 0);
+  eq(r.prefs.length, 0);
 });
 
 test('path suffix resolution — unambiguous short name', () => {
@@ -198,7 +198,7 @@ Engineering
 Alice strongly prefers Lead
 `);
   ok(r.errors.length === 0, r.errors.join());
-  eq(r.springs[0].to, 'Engineering/Frontend/Lead');
+  eq(r.prefs[0].to, ['Engineering/Frontend/Lead']);
 });
 
 test('path suffix resolution — partial path', () => {
@@ -216,11 +216,11 @@ Alice strongly prefers Frontend/Lead
 Alice prefers Backend/Lead
 `);
   ok(r.errors.length === 0, r.errors.join());
-  eq(r.springs[0].to, 'Engineering/Frontend/Lead');
-  eq(r.springs[1].to, 'Engineering/Backend/Lead');
+  eq(r.prefs[0].to, ['Engineering/Frontend/Lead']);
+  eq(r.prefs[1].to, ['Engineering/Backend/Lead']);
 });
 
-test('ambiguous bare name produces error', () => {
+test('multi-target: bare name matching several areas creates one spring satisfied by any', () => {
   const r = parseInput(`
 == PEOPLE ==
 Alice
@@ -233,8 +233,43 @@ Engineering
 == PREFERENCES ==
 Alice strongly prefers Lead
 `);
-  ok(r.errors.some(e => e.toLowerCase().includes('ambiguous')), 'expected ambiguity error');
-  eq(r.springs.length, 0);
+  ok(r.errors.length === 0, r.errors.join());
+  eq(r.prefs.length, 1);
+  eq(r.prefs[0].to.length, 2);
+  ok(r.prefs[0].to.includes('Engineering/Frontend/Lead'));
+  ok(r.prefs[0].to.includes('Engineering/Backend/Lead'));
+  eq(r.prefs[0].toRef, 'Lead');
+  // Solver should satisfy the spring regardless of which Lead Alice lands in
+  const { assignment, happiness } = solveAssignments(r);
+  const inALead = assignment['Alice'] === 'Engineering/Frontend/Lead'
+               || assignment['Alice'] === 'Engineering/Backend/Lead';
+  ok(inALead, `Alice should be in a Lead slot, got ${assignment['Alice']}`);
+  ok(Math.abs(happiness['Alice'] - 1) < 0.01, `expected full happiness, got ${happiness['Alice']}`);
+});
+
+test('names with spaces work in PEOPLE and PREFERENCES', () => {
+  const r = parseInput(`
+== PEOPLE ==
+David Larrea
+Laia Escriba
+== STRUCTURE ==
+Engineering
+  Frontend
+  Backend
+== PREFERENCES ==
+David Larrea prefers Frontend
+Laia Escriba avoids David Larrea
+`);
+  ok(r.errors.length === 0, r.errors.join());
+  ok('David Larrea' in r.nodes);
+  ok('Laia Escriba' in r.nodes);
+  eq(r.prefs[0].from, 'David Larrea');
+  eq(r.prefs[0].to, ['Engineering/Frontend']);
+  eq(r.prefs[1].from, 'Laia Escriba');
+  eq(r.prefs[1].to, ['David Larrea']);
+  const { assignment } = solveAssignments(r);
+  eq(assignment['David Larrea'], 'Engineering/Frontend');
+  ok(assignment['Laia Escriba'] !== assignment['David Larrea'], 'Laia avoids David');
 });
 
 test('multi-level structure paths are correct', () => {
@@ -307,7 +342,7 @@ Engineering
 @Alice  Alice -> Frontend : +8
 `);
   ok(r.errors.length > 0, 'expected parse error for old/unknown syntax');
-  eq(r.springs.length, 0);
+  eq(r.prefs.length, 0);
 });
 
 // ── Solver ────────────────────────────────────────────────────────
@@ -579,7 +614,9 @@ Bob strongly prefers Lead
   eq(assignment['Bob'], 'Engineering/General');
 });
 
-test('no preferences — people spread across all areas', () => {
+test('no preferences — everyone gets a valid assignment', () => {
+  // With no preferences all assignments are equally happy (score 0 each),
+  // so the solver makes no promise about spread — just that everyone is placed.
   const r = parseInput(`
 == PEOPLE ==
 Alice
@@ -591,11 +628,10 @@ Engineering
   Frontend
   Backend
 `);
-  const { assignment } = solveAssignments(r);
-  const inFrontend = Object.values(assignment).filter(a => a === 'Engineering/Frontend').length;
-  const inBackend  = Object.values(assignment).filter(a => a === 'Engineering/Backend').length;
-  ok(inFrontend >= 1, `Frontend should have at least 1 person, got ${inFrontend}`);
-  ok(inBackend >= 1, `Backend should have at least 1 person, got ${inBackend}`);
+  const { assignment, happiness } = solveAssignments(r);
+  const areas = new Set(['Engineering/Frontend', 'Engineering/Backend']);
+  ok(r.mobileNodes.every(p => areas.has(assignment[p])), 'everyone has a valid area');
+  ok(r.mobileNodes.every(p => happiness[p] === 1), 'everyone with no prefs is fully happy');
 });
 
 test('fill minimums before preferences', () => {

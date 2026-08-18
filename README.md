@@ -32,61 +32,57 @@ Engineering
     Lead           size:1
 ```
 
-Short names that appear more than once (e.g. `Lead` under both Frontend and Backend) are disambiguated in preferences using partial path syntax: `Frontend/Lead` vs `Backend/Lead`.
-
 ### `== PREFERENCES ==`
 
 Express where someone should (or shouldn't) go. Use an optional `# comment` to record the reasoning.
 
 ```txt
-Alice strongly prefers Frontend     # part of her growth plan
+Alice strongly prefers Frontend      # part of her growth plan
 Carol prefers Alice                  # Carol wants to work with Alice
 Dave avoids Carol                    # conflict of interest
-Bob requires Backend/Lead            # confirmed with leadership
+Bob requires Backend/Lead
+Alice prefers Lead
 ```
+
+Short structure names that appear more than once (e.g. `Lead` under both Frontend and Backend) can be disambiguated in preferences using partial path syntax: `Frontend/Lead` vs `Backend/Lead`. But can also be used as a target of multiple places. For Example `Alice prefers Lead` will make Alice happy in either `Backend/Lead` or `Frontend/Lead` assignment.
 
 **Verbs and their strength:**
 
-| Verb | Force | Meaning |
-| --- | --- | --- |
-| `prefers` | +6 | mild preference for |
-| `strongly prefers` | +8 | strong preference for |
-| `requires` | +100 | effectively mandatory (beats all other considerations) |
-| `avoids` | −6 | mild avoidance of |
-| `strongly avoids` | −8 | strong avoidance of |
+`requires` is stronger than | `strongly prefers`, which is stronger than `prefers`.
+`strongly avoids` is stronger than `avoids`.
 
-The target can be an **area** (placement preference) or a **person** (co-location / separation preference).
-
-Avoidance springs are binary — any separation from the target is fully satisfying.
+The target can be an **area** (placement preference) or a **person**.
 
 ## Assignment logic
 
-People are assigned to areas to maximize total preference satisfaction. The solver runs:
+People are assigned to areas to maximise total happiness — the sum of each person's raw preference satisfaction score.
 
-1. **Greedy** — place each person (PEOPLE order) in the best available spot
-2. **Hill-climbing** — single-move passes until stable
-3. **Swap passes** — exchange pairs of people to escape greedy local optima
+Each preference contributes its force when met (positive), or subtracts when violated (negative for avoidance in the same area). Capacity is enforced as a hard constraint — moves that exceed `sizeMax` are never applied.
+
+### Solver phases (deterministic — same input always gives the same output)
+
+**Phase 1 — Pseudo-random seed**  
+Free people are placed in a random order into assignable areas using a deterministic seed derived from the input. Same input always produces the same initial placement.
+
+**Phase 2 — Preference-guided improvement loop**  
+Each round the solver finds the least happy free person and builds candidate moves *directly from their preferences*:
+
+- **Area preference (+)**: try moving the person to each matching area; try swapping with anyone already there.
+- **Area preference (−)**: if the person is currently in the avoided area, try moving them anywhere else.
+- **Person preference (+)**: try every area for this person (closeness is a gradient); also try bringing the other person closer or swapping.
+- **Person preference (−)**: if sharing an area with someone they avoid, try moving either of them out.
+
+Every candidate is scored by Δ total happiness. The best improving move is applied (even if it moves someone other than the least-happy person — e.g. swapping them out). The loop restarts until no person has any improving move.
 
 ### Co-location closeness
 
-Person-to-person co-location springs (`Alice+Bob`) use a continuous **closeness** score instead of a binary same-area check:
+Person-to-person preferences (`Alice prefers Bob`) use a **closeness** score:
 
 ```txt
 closeness = 1 / (1 + tree_hops_through_LCA)
 ```
 
-`tree_hops_through_LCA` is the total number of edges between both areas and their Lowest Common Ancestor. The spring's contribution to score and happiness is `force × closeness`.
-
-| Arrangement | Example | Closeness | Happiness |
-| --- | --- | --- | --- |
-| Same area | both in Frontend | 1.0 | 100% |
-| Parent / child | Frontend & Frontend/Lead | 0.5 | 50% |
-| Two levels apart | Frontend & Frontend/Lead/Senior | 0.33 | 33% |
-| Different subtrees | Frontend & Backend | 0 | 0% |
-
-The tooltip shows `~` for partial satisfaction with the LCA node name so you can see exactly where the paths meet.
-
-**Avoidance springs** (`Alice-Bob`) stay binary — any separation is fully satisfying.
+The tooltip shows `~` for partial satisfaction with the LCA node.
 
 ## Happiness
 

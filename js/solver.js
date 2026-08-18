@@ -1,5 +1,9 @@
 'use strict';
 
+const _now = typeof performance !== 'undefined' ? () => performance.now() : () => Date.now();
+
+// ── Topology ──────────────────────────────────────────────────────────────────
+
 function buildAncestors(nodes) {
   const anc = {};
   for (const path of Object.keys(nodes).filter(p => !nodes[p].mobile)) {
@@ -11,35 +15,16 @@ function buildAncestors(nodes) {
   return anc;
 }
 
-/**
- * Lowest Common Ancestor of two area paths in the node tree.
- * Returns the path string of the LCA, or null if the two nodes share no ancestor.
- */
 function lcaPath(area1, area2, nodes) {
   if (!area1 || !area2) return null;
-  const anc = new Set();
+  const seen = new Set();
   let cur = area1;
-  while (cur) { anc.add(cur); const nd = nodes[cur]; cur = nd ? nd.parent : null; }
+  while (cur) { seen.add(cur); const nd = nodes[cur]; cur = nd ? nd.parent : null; }
   cur = area2;
-  while (cur) { if (anc.has(cur)) return cur; const nd = nodes[cur]; cur = nd ? nd.parent : null; }
+  while (cur) { if (seen.has(cur)) return cur; const nd = nodes[cur]; cur = nd ? nd.parent : null; }
   return null;
 }
 
-/**
- * Closeness score (0–1) between two area paths for co-location scoring.
- *
- *   closeness = 1 / (1 + depth_diff)   when one area is an ancestor of the other
- *   closeness = 0                       when the areas are in different subtrees
- *
- * "Ancestor/descendant" means one person IS in (or above) the container of the other.
- * Alice in Frontend and Bob in Frontend/Lead scores 0.5 (they share a team).
- * Alice in Frontend and Bob in Backend score 0 — different subtrees, fully apart.
- * This preserves the intuition that sibling-branch separation is "fully apart" while
- * rewarding co-location within the same sub-team.
- *
- * Used only for positive (co-location) person-to-person springs.
- * Avoidance springs remain binary — any separation is fully satisfying.
- */
 function closeness(area1, area2, nodes) {
   if (!area1 || !area2) return 0;
   if (area1 === area2) return 1;
@@ -49,29 +34,65 @@ function closeness(area1, area2, nodes) {
   return 1 / (1 + hopsTo(area1, lca) + hopsTo(area2, lca));
 }
 
+// ── Stage 1a: Individual happiness ───────────────────────────────────────────
+
 /**
- * Compute per-author happiness (0–1) given an assignment map.
- * Exported so app.js can recompute after manual drag-and-drop overrides.
+ * Raw preference satisfaction score for one person.
+ * Positive forces add when satisfied; negative forces subtract when violated.
  */
+function computeIndividualHappiness(parsed, person, assignment, anc) {
+  const { nodes, prefs } = parsed;
+  if (!anc) anc = buildAncestors(nodes);
+  const area = assignment[person];
+  if (!area) return 0;
+  const personAnc = anc[area] || new Set([area]);
+  let score = 0;
+  for (const s of prefs) {
+    if (s.from !== person || !nodes[s.to[0]]) continue;
+    if (!nodes[s.to[0]].mobile) {
+      if (s.to.some(t => personAnc.has(t))) score += s.force;
+    } else if (s.force > 0) {
+      score += s.force * closeness(area, assignment[s.to[0]], nodes);
+    } else {
+      if (assignment[s.to[0]] === area) score += s.force;
+    }
+  }
+  return score;
+}
+
+// ── Stage 1b: Total happiness ─────────────────────────────────────────────────
+
+/** Sum of individual happiness scores — the value the solver maximises. */
+function computeTotalHappiness(parsed, assignment, anc) {
+  if (!anc) anc = buildAncestors(parsed.nodes);
+  return parsed.mobileNodes.reduce(
+    (sum, p) => sum + computeIndividualHappiness(parsed, p, assignment, anc),
+    0
+  );
+}
+
+// ── Normalised 0–1 happiness per person (UI display only) ─────────────────────
+
 function computeHappiness(parsed, assignment, anc) {
-  const { nodes, mobileNodes, springs } = parsed;
+  const { nodes, mobileNodes, prefs } = parsed;
   if (!anc) anc = buildAncestors(nodes);
   const happiness = {};
   for (const person of mobileNodes) {
-    const relevant = springs.filter(s => s.from === person);
+    const relevant = prefs.filter(s => s.from === person);
     if (!relevant.length) { happiness[person] = 1; continue; }
     let satisfied = 0, possible = 0;
     for (const s of relevant) {
       const mag = Math.abs(s.force);
       possible += mag;
-      const fromArea = assignment[s.from];
-      if (!fromArea || !nodes[s.to]) continue;
-      if (!nodes[s.to].mobile) {
+      const fromArea = assignment[person];
+      if (!fromArea || !nodes[s.to[0]]) continue;
+      if (!nodes[s.to[0]].mobile) {
         const fromAnc = anc[fromArea] || new Set([fromArea]);
-        if (s.force > 0 &&  fromAnc.has(s.to)) satisfied += mag;
-        if (s.force < 0 && !fromAnc.has(s.to)) satisfied += mag;
+        const inAny = s.to.some(t => fromAnc.has(t));
+        if (s.force > 0 && inAny) satisfied += mag;
+        if (s.force < 0 && !inAny) satisfied += mag;
       } else {
-        const toArea = assignment[s.to];
+        const toArea = assignment[s.to[0]];
         if (s.force > 0) satisfied += mag * closeness(fromArea, toArea, nodes);
         else if (toArea !== fromArea) satisfied += mag;
       }
@@ -81,204 +102,245 @@ function computeHappiness(parsed, assignment, anc) {
   return happiness;
 }
 
-// Spread bonus constants.
-// FILL_MIN: awarded per slot filled up to an area's minimum (beats any single preference).
-// FILL_SPREAD: harmonic bonus for the k-th person in an area — decays as area fills,
-//   so the solver spreads people rather than stacking. Must stay below 12 so that any
-//   co-location preference (+6 = the weakest) can pull two people into the same area.
-const FILL_MIN = 50;
-const FILL_SPREAD = 10;
+// ── Capacity ──────────────────────────────────────────────────────────────────
 
-/**
- * Cumulative spread score for placing n people into an area.
- * Filling up to the minimum gets the large bonus; beyond that, harmonic decay.
- */
-function areaSpreadScore(sizeMin, n) {
-  let s = 0;
-  for (let k = 0; k < n; k++) {
-    s += (sizeMin > 0 && k < sizeMin) ? (sizeMin - k) * FILL_MIN : FILL_SPREAD / (k + 1);
+function buildSubtreeCounts(nodes, mobileNodes, assignment) {
+  const counts = {};
+  for (const p of Object.keys(nodes)) if (!nodes[p].mobile) counts[p] = 0;
+  for (const person of mobileNodes) {
+    let cur = assignment[person]; if (!cur) continue;
+    while (cur) { if (cur in counts) counts[cur]++; const nd = nodes[cur]; cur = nd ? nd.parent : null; }
   }
-  return s;
+  return counts;
 }
 
-/**
- * Marginal spread benefit of adding the next person to an area that already has prevCount people.
- */
-function spreadDelta(sizeMin, prevCount) {
-  return (sizeMin > 0 && prevCount < sizeMin)
-    ? (sizeMin - prevCount) * FILL_MIN
-    : FILL_SPREAD / (prevCount + 1);
+function isCapacityValid(nodes, mobileNodes, assignment) {
+  const counts = buildSubtreeCounts(nodes, mobileNodes, assignment);
+  for (const p of Object.keys(nodes)) {
+    if (!nodes[p].mobile && nodes[p].sizeMax < 999 && counts[p] > nodes[p].sizeMax) return false;
+  }
+  return true;
 }
 
+// ── Deterministic pseudo-random (FNV-1a hash + LCG) ──────────────────────────
+
+function hashStr(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function makeLCG(seed) {
+  let s = seed >>> 0;
+  return () => { s = (Math.imul(1664525, s) + 1013904223) >>> 0; return s; };
+}
+
+function shuffle(arr, rand) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = rand() % (i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// ── Solver ────────────────────────────────────────────────────────────────────
+
 /**
- * Solve the optimal assignment of people to areas.
- * Pinned people are treated as immovable constraints; only unpinned people are optimized.
- * The full assignment (pinned + unpinned) is used for capacity counts and scoring, so
- * everyone else is arranged optimally around the pinned positions.
+ * Assign free people to areas to maximise computeTotalHappiness.
  *
- * Algorithm:
- * 1. Seed assignment with pins
- * 2. Greedy init for unpinned (PEOPLE order, area springs + spread bonus)
- * 3. Hill-climbing: single-move passes over unpinned people until stable
- * 4. Swap passes: exchange two unpinned people (escapes greedy local optima)
+ * Phase 1 — deterministic pseudo-random seed
+ *   Each free person is placed in a randomly-shuffled area order (seed derived
+ *   from the input, so same input → same output every time).
  *
- * @param {ParseResult} parsed
- * @param {Record<string,string>} [pins]  person → leaf-area path (manual overrides)
- * @returns {{ assignment: Record<string,string>, happiness: Record<string,number> }}
+ * Phase 2 — preference-guided improvement loop
+ *   Each round: find the least happy free person and build candidate moves
+ *   directly from their preferences:
+ *     • Area prefs (+): move person to each matching area; swap with anyone there.
+ *     • Area prefs (−): move person out if they're currently in the avoided area.
+ *     • Person prefs (+): try every area for this person (closeness gradient);
+ *       also move the other person closer; or swap.
+ *     • Person prefs (−): if sharing an area, try moving either person out.
+ *   Score every candidate by Δ computeTotalHappiness. Apply the best improving
+ *   move (or skip to next person if none improve). Restart until no one can improve.
  */
 function solveAssignments(parsed, pins) {
-  const { nodes, mobileNodes, springs } = parsed;
+  const { nodes, mobileNodes, prefs } = parsed;
   pins = pins || {};
 
-  // An area is assignable if it is a leaf (terminal slot) OR has an explicit size constraint.
-  // Pure container nodes (no size, has children) are skipped — they are structural only.
   const assignableAreas = Object.keys(nodes).filter(p =>
     !nodes[p].mobile && (nodes[p].children.length === 0 || nodes[p].sizeMax < 999)
   );
-  if (!assignableAreas.length || !mobileNodes.length) return { assignment: {}, happiness: {} };
+  if (!assignableAreas.length || !mobileNodes.length)
+    return { assignment: {}, happiness: {}, timing: {} };
 
   const anc = buildAncestors(nodes);
 
-  // Count everyone in the subtree rooted at `area`, excluding one person.
-  function subtreeCount(map, area, exclude) {
-    let c = mobileNodes.filter(p => p !== exclude && map[p] === area).length;
-    for (const child of nodes[area].children) c += subtreeCount(map, child, exclude);
-    return c;
-  }
-
-  // Build a subtree-count map for all area nodes in O(people × depth).
-  function buildSubtreeCounts(map) {
-    const counts = {};
-    for (const path of Object.keys(nodes)) if (!nodes[path].mobile) counts[path] = 0;
-    for (const person of mobileNodes) {
-      let cur = map[person]; if (!cur) continue;
-      while (cur) {
-        if (cur in counts) counts[cur]++;
-        const nd = nodes[cur]; cur = nd ? nd.parent : null;
-      }
-    }
-    return counts;
-  }
-
-  // Seed with valid pins; invalid ones (unknown person/area) are silently ignored
+  // Seed with valid pins
   const assignment = {};
   for (const person of mobileNodes) {
     const target = pins[person];
-    if (target && target in nodes && !nodes[target].mobile) {
-      assignment[person] = target;
-    }
+    if (target && target in nodes && !nodes[target].mobile) assignment[person] = target;
   }
   const pinnedSet = new Set(Object.keys(assignment));
   const free = mobileNodes.filter(p => !pinnedSet.has(p));
 
-  // Capacity: walk the ancestor chain so that placing someone in a child also checks
-  // parent capacity. Pins bypass the check for themselves (their occupancy is already counted).
-  function capacityOk(map, person, area) {
-    let cur = area;
-    while (cur) {
-      const nd = nodes[cur]; if (!nd) break;
-      if (nd.sizeMax < 999 && subtreeCount(map, cur, person) >= nd.sizeMax) return false;
-      cur = nd.parent;
-    }
-    return true;
-  }
+  const label = p => p.split('/').pop(); // short display name for logs
 
-  function totalScore(map) {
-    let score = 0;
-    const sc = buildSubtreeCounts(map);
-    // Preference score (all people — pinned springs also count)
-    for (const person of mobileNodes) {
-      const area = map[person]; if (!area) continue;
-      const personAnc = anc[area] || new Set([area]);
-      for (const s of springs) {
-        if (s.from !== person || !nodes[s.to]) continue;
-        if (!nodes[s.to].mobile) { if (personAnc.has(s.to)) score += s.force; }
-        else if (s.force > 0) { score += s.force * closeness(area, map[s.to], nodes); }
-        else { if (map[s.to] === area) score += s.force; }
-      }
-    }
-    // Spread score: use subtree counts so placing someone in a child area also credits
-    // the parent's minimum-fill progress.
-    for (const area of assignableAreas) {
-      score += areaSpreadScore(nodes[area].sizeMin, sc[area] || 0);
-    }
-    return score;
-  }
+  // ── Phase 1: deterministic pseudo-random placement ───────────────────────
 
-  // Marginal spread improvement when placing one more person into `area` and all its ancestors.
-  // Uses gCounts, which are maintained incrementally during greedy.
-  const gCounts = buildSubtreeCounts(assignment); // starts with pinned occupancy
-  function fullSpreadDelta(area) {
-    let delta = 0;
-    let cur = area;
-    while (cur) {
-      const nd = nodes[cur]; if (!nd) break;
-      delta += spreadDelta(nd.sizeMin, gCounts[cur] || 0);
-      cur = nd.parent;
-    }
-    return delta;
-  }
+  const seedStr = [...mobileNodes, ...Object.keys(nodes).sort(),
+    ...prefs.map(p => `${p.from}${p.force}${p.toRef}`)].join('|');
+  const seed = hashStr(seedStr);
+  const rand = makeLCG(seed);
 
-  // Greedy: place free people in PEOPLE order using area springs + spread bonus
+  console.log(`[Phase 1] Placing ${free.length} people (seed ${seed})`);
   for (const person of free) {
-    let best = assignableAreas[0], bestSc = -Infinity;
-    for (const area of assignableAreas) {
-      if (!capacityOk(assignment, person, area)) continue;
-      const personAnc = anc[area] || new Set([area]);
-      let sc = fullSpreadDelta(area);
-      for (const s of springs) {
-        if (s.from !== person || !nodes[s.to] || nodes[s.to].mobile) continue;
-        if (personAnc.has(s.to)) sc += s.force;
-      }
-      if (sc > bestSc) { bestSc = sc; best = area; }
+    const order = shuffle([...assignableAreas], rand);
+    let placed = false;
+    for (const area of order) {
+      assignment[person] = area;
+      if (isCapacityValid(nodes, mobileNodes, assignment)) { placed = true; break; }
     }
-    assignment[person] = best;
-    // Update incremental counts for next person
-    let cur = best;
-    while (cur) {
-      if (cur in gCounts) gCounts[cur]++;
-      const nd = nodes[cur]; cur = nd ? nd.parent : null;
-    }
+    if (!placed) assignment[person] = order[0];
+    console.log(`  ${person} → ${label(assignment[person])}`);
   }
+  console.log(`  Initial total happiness: ${computeTotalHappiness(parsed, assignment, anc).toFixed(1)}`);
 
-  // Hill-climbing: move free people only
-  let changed = true;
-  for (let iter = 0; changed && iter < 100; iter++) {
-    changed = false;
-    for (const person of free) {
-      const baseline = totalScore(assignment);
-      let best = assignment[person], bestSc = baseline;
-      for (const area of assignableAreas) {
-        if (area === assignment[person] || !capacityOk(assignment, person, area)) continue;
-        const prev = assignment[person];
-        assignment[person] = area;
-        const sc = totalScore(assignment);
-        if (sc > bestSc) { bestSc = sc; best = area; }
-        assignment[person] = prev;
+  // ── Phase 2: preference-guided improvement ───────────────────────────────
+
+  console.log('\n[Phase 2] Preference-guided improvement');
+  const t0 = _now();
+  let moves = 0;
+  let anyImproved = true;
+
+  while (anyImproved) {
+    anyImproved = false;
+
+    const baseTotal = computeTotalHappiness(parsed, assignment, anc);
+
+    // Least happy free person first
+    const ranked = [...free].sort((a, b) =>
+      computeIndividualHappiness(parsed, a, assignment, anc) -
+      computeIndividualHappiness(parsed, b, assignment, anc)
+    );
+
+    for (const person of ranked) {
+      const personPrefs = prefs.filter(s => s.from === person);
+      if (!personPrefs.length) continue; // no preferences, nothing to guide
+
+      const score = computeIndividualHappiness(parsed, person, assignment, anc);
+      console.log(`  Focusing on ${person} (score ${score.toFixed(1)}, in ${label(assignment[person])})`);
+
+      // Build candidate moves guided by this person's preferences
+      const candidates = [];
+      const seen = new Set();
+
+      function addMove(who, to) {
+        if (!to || to === assignment[who]) return;
+        const key = `mv:${who}:${to}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({ type: 'move', who, to });
       }
-      if (best !== assignment[person]) { assignment[person] = best; changed = true; }
-    }
-  }
 
-  // Swap passes: exchange two free people in different areas
-  let swapChanged = true;
-  for (let iter = 0; swapChanged && iter < 50; iter++) {
-    swapChanged = false;
-    for (let i = 0; i < free.length; i++) {
-      for (let j = i + 1; j < free.length; j++) {
-        const p1 = free[i], p2 = free[j];
-        if (assignment[p1] === assignment[p2]) continue;
-        const baseline = totalScore(assignment);
-        const a1 = assignment[p1], a2 = assignment[p2];
-        assignment[p1] = a2; assignment[p2] = a1;
-        if (totalScore(assignment) > baseline) {
-          swapChanged = true;
-        } else {
-          assignment[p1] = a1; assignment[p2] = a2;
+      function addSwap(a, b) {
+        if (!b || assignment[a] === assignment[b]) return;
+        const key = `sw:${[a, b].sort().join(':')}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({ type: 'swap', a, b });
+      }
+
+      for (const s of personPrefs) {
+        const isArea = !nodes[s.to[0]].mobile;
+
+        if (isArea && s.force > 0) {
+          // Prefers an area: try moving there; swap with anyone already in it
+          for (const area of assignableAreas) {
+            if (s.to.some(t => (anc[area] || new Set([area])).has(t))) {
+              addMove(person, area);
+              for (const other of free) {
+                if (other !== person && assignment[other] === area) addSwap(person, other);
+              }
+            }
+          }
+        } else if (isArea && s.force < 0) {
+          // Avoids an area: if currently in it, try moving anywhere else
+          const cur = assignment[person];
+          if (cur && s.to.some(t => (anc[cur] || new Set([cur])).has(t))) {
+            for (const area of assignableAreas) addMove(person, area);
+          }
+        } else if (!isArea) {
+          const other = s.to[0];
+          const isFree = !pinnedSet.has(other);
+
+          if (s.force > 0) {
+            // Wants to be near other: try all areas for this person (closeness is a
+            // gradient — any area might improve it); also bring the other person closer
+            for (const area of assignableAreas) addMove(person, area);
+            if (isFree) addMove(other, assignment[person]);
+            if (isFree) addSwap(person, other);
+          } else {
+            // Avoids other: if sharing an area, try moving either of them out
+            if (assignment[other] === assignment[person]) {
+              for (const area of assignableAreas) addMove(person, area);
+              if (isFree) for (const area of assignableAreas) addMove(other, area);
+            }
+          }
         }
       }
+
+      console.log(`    ${candidates.length} candidates from preferences`);
+
+      // Score every candidate, pick the best improvement
+      let bestDelta = 0, bestMove = null;
+
+      for (const cand of candidates) {
+        let delta;
+        if (cand.type === 'move') {
+          const prev = assignment[cand.who];
+          assignment[cand.who] = cand.to;
+          if (isCapacityValid(nodes, mobileNodes, assignment)) {
+            delta = computeTotalHappiness(parsed, assignment, anc) - baseTotal;
+            if (delta > bestDelta) { bestDelta = delta; bestMove = cand; }
+          }
+          assignment[cand.who] = prev;
+        } else {
+          const prevA = assignment[cand.a], prevB = assignment[cand.b];
+          assignment[cand.a] = prevB; assignment[cand.b] = prevA;
+          if (isCapacityValid(nodes, mobileNodes, assignment)) {
+            delta = computeTotalHappiness(parsed, assignment, anc) - baseTotal;
+            if (delta > bestDelta) { bestDelta = delta; bestMove = cand; }
+          }
+          assignment[cand.a] = prevA; assignment[cand.b] = prevB;
+        }
+      }
+
+      if (bestMove) {
+        if (bestMove.type === 'move') {
+          console.log(`    → Move ${bestMove.who} to ${label(bestMove.to)} (Δ${bestDelta.toFixed(1)})`);
+          assignment[bestMove.who] = bestMove.to;
+        } else {
+          console.log(`    → Swap ${bestMove.a} (${label(assignment[bestMove.a])}) ↔ ${bestMove.b} (${label(assignment[bestMove.b])}) (Δ${bestDelta.toFixed(1)})`);
+          const tmp = assignment[bestMove.a];
+          assignment[bestMove.a] = assignment[bestMove.b];
+          assignment[bestMove.b] = tmp;
+        }
+        moves++;
+        anyImproved = true;
+        break; // restart — re-rank by happiness after this move
+      } else {
+        console.log(`    No improvement found for ${person}, trying next`);
+      }
     }
   }
 
-  return { assignment, happiness: computeHappiness(parsed, assignment, anc) };
+  const totalMs = _now() - t0;
+  console.log(`\n[Done] Total happiness: ${computeTotalHappiness(parsed, assignment, anc).toFixed(1)} — ${moves} moves (${totalMs.toFixed(1)}ms)`);
+
+  return {
+    assignment,
+    happiness: computeHappiness(parsed, assignment, anc),
+    timing: { totalMs: Math.round(totalMs * 10) / 10, moves },
+  };
 }

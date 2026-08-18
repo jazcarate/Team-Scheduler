@@ -14,11 +14,14 @@
 
 /**
  * @typedef {Object} PreferenceDef
- * @property {string} from     resolved path — person whose placement this affects (must be in PEOPLE)
- * @property {string} to       resolved path — destination node
- * @property {number} force    positive = attraction, negative = avoidance
- * @property {string} verb     'prefers' | 'strongly prefers' | 'requires' | 'avoids' | 'strongly avoids'
- * @property {string} comment  optional inline comment (text after # on the preference line)
+ * @property {string}   from    resolved path — person whose placement this affects (must be in PEOPLE)
+ * @property {string[]} to      resolved path(s) — one element for exact/unique matches, multiple when
+ *                              the reference matches several nodes by suffix (e.g. "Lead" matching every
+ *                              team's Lead sub-area). Preference is satisfied when ANY target is met.
+ * @property {string}   toRef   original reference text as written (used for display)
+ * @property {number}   force   positive = attraction, negative = avoidance
+ * @property {string}   verb    'prefers' | 'strongly prefers' | 'requires' | 'avoids' | 'strongly avoids'
+ * @property {string}   comment optional inline comment (text after # on the preference line)
  */
 
 /**
@@ -26,32 +29,36 @@
  * @property {Record<string,NodeDef>} nodes   all nodes keyed by path
  * @property {string[]} rootNodes             top-level structural node paths
  * @property {string[]} mobileNodes           person node names (= paths for persons)
- * @property {PreferenceDef[]} springs
+ * @property {PreferenceDef[]} prefs
  * @property {string[]} errors
  */
 
 /**
- * Resolve a reference to a canonical node path.
- * Supports exact match and path suffix ("Frontend/Lead").
+ * Resolve a reference to one or more canonical node paths.
+ *
+ * Resolution order:
+ *   1. Exact match
+ *   2. Case-insensitive exact match
+ *   3. Case-insensitive suffix match (e.g. "Lead" → all paths ending in "/Lead")
+ *      When multiple paths match, ALL are returned — the preference targets any of them.
+ *
+ * Returns null and pushes an error only when zero nodes match.
+ *
  * @param {string} ref
  * @param {Record<string,NodeDef>} nodes
  * @param {string[]} errors
- * @returns {string|null}
+ * @returns {string[]|null}
  */
-function resolveRef(ref, nodes, errors) {
-  if (ref in nodes) return ref;
+function resolveRefs(ref, nodes, errors) {
+  if (ref in nodes) return [ref];
   const refLow = ref.toLowerCase();
   // Case-insensitive exact match
   const ci = Object.keys(nodes).find(p => p.toLowerCase() === refLow);
-  if (ci) return ci;
-  // Case-insensitive suffix match
+  if (ci) return [ci];
+  // Case-insensitive suffix match — returns ALL matching paths (multi-target)
   const suffixLow = '/' + refLow;
   const matches = Object.keys(nodes).filter(p => p.toLowerCase().endsWith(suffixLow));
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    errors.push(`Ambiguous reference "${ref}" — could be: ${matches.join(', ')}`);
-    return null;
-  }
+  if (matches.length >= 1) return matches;
   errors.push(`Unknown node: "${ref}"`);
   return null;
 }
@@ -78,7 +85,7 @@ function parseInput(text) {
   /** @type {{path:string,indent:number}[]} */ const stack = [];
 
   for (const raw of text.split('\n')) {
-    // Strip trailing comments for structural scanning; PREFERENCES re-reads raw for inline comments
+    // Strip trailing comments; PREFERENCES re-reads raw to preserve inline comments
     const stripped = raw.replace(/#.*$/, '');
     if (!stripped.trim()) continue;
     const indent = stripped.length - stripped.trimStart().length;
@@ -92,7 +99,8 @@ function parseInput(text) {
     }
 
     if (section === 'PEOPLE') {
-      const name = line.split(/\s+/)[0];
+      // Full trimmed line is the person's name — spaces allowed
+      const name = line;
       if (!name) continue;
       if (name in nodes) { errors.push(`Duplicate name: "${name}"`); continue; }
       nodes[name] = { name, path: name, mobile: true, sizeMin: 0, sizeMax: 999, children: [], parent: null };
@@ -104,12 +112,13 @@ function parseInput(text) {
       while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
       const parentPath = stack.length > 0 ? stack[stack.length - 1].path : null;
 
-      const parts = line.split(/\s+/);
-      const name = parts[0];
+      // Name is everything before the first size: annotation
+      const sizeIdx = line.search(/\s+size:/i);
+      const name = (sizeIdx >= 0 ? line.slice(0, sizeIdx) : line).trim();
       if (!name) continue;
       let sizeMin = 0, sizeMax = 999;
-      for (const p of parts.slice(1)) {
-        const sm = p.match(/^size:(\d+)(?:-(\d+))?$/i);
+      if (sizeIdx >= 0) {
+        const sm = line.slice(sizeIdx).match(/size:(\d+)(?:-(\d+))?/i);
         if (sm) {
           sizeMin = parseInt(sm[1], 10);
           sizeMax = sm[2] !== undefined ? parseInt(sm[2], 10) : sizeMin;
@@ -132,11 +141,12 @@ function parseInput(text) {
 
       let matched = false;
       for (const [verb, force] of PREF_VERBS) {
-        // Allow one or more spaces between words in multi-word verbs
+        // Greedy (.+) for from-name so multi-word names match fully;
+        // verb is the separator; non-greedy ([^#]+?) for to-name stops before optional # comment.
         const verbRe = verb.replace(/\s+/g, '\\s+');
-        const m = rawLine.match(new RegExp(`^(\\S+)\\s+${verbRe}\\s+(\\S+)(?:\\s*#\\s*(.+))?$`, 'i'));
+        const m = rawLine.match(new RegExp(`^(.+)\\s+${verbRe}\\s+([^#]+?)(?:\\s*#\\s*(.+))?$`, 'i'));
         if (m) {
-          rawPrefs.push({ fromRef: m[1], toRef: m[2], force, verb, comment: (m[3] || '').trim() });
+          rawPrefs.push({ fromRef: m[1].trim(), toRef: m[2].trim(), force, verb, comment: (m[3] || '').trim() });
           matched = true;
           break;
         }
@@ -149,17 +159,29 @@ function parseInput(text) {
   }
 
   // Resolve preferences
-  /** @type {PreferenceDef[]} */ const springs = [];
+  /** @type {PreferenceDef[]} */ const prefs = [];
   for (const rp of rawPrefs) {
-    const from = resolveRef(rp.fromRef, nodes, errors);
-    const to   = resolveRef(rp.toRef,   nodes, errors);
-    if (from !== null && to !== null) {
-      if (!nodes[from].mobile) {
-        errors.push(`Preference "from" must be a person from == PEOPLE ==: "${rp.fromRef}"`); continue;
-      }
-      springs.push({ from, to, force: rp.force, verb: rp.verb, comment: rp.comment });
+    const froms = resolveRefs(rp.fromRef, nodes, errors);
+    const tos   = resolveRefs(rp.toRef,   nodes, errors);
+    if (!froms || !tos) continue;
+
+    // from must resolve to a single person
+    if (froms.length > 1 || !nodes[froms[0]].mobile) {
+      errors.push(`Preference "from" must be a single person from == PEOPLE ==: "${rp.fromRef}"`);
+      continue;
     }
+    const from = froms[0];
+
+    // All targets must be the same type (all areas or all people — no mixing)
+    const anyMobile = tos.some(t => nodes[t].mobile);
+    const anyArea   = tos.some(t => !nodes[t].mobile);
+    if (anyMobile && anyArea) {
+      errors.push(`Preference target "${rp.toRef}" matches both people and areas — be more specific`);
+      continue;
+    }
+
+    prefs.push({ from, to: tos, toRef: rp.toRef, force: rp.force, verb: rp.verb, comment: rp.comment });
   }
 
-  return { nodes, rootNodes, mobileNodes, springs, errors };
+  return { nodes, rootNodes, mobileNodes, prefs, errors };
 }
