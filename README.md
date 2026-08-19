@@ -12,7 +12,7 @@ Open `index.html` directly in a browser.
 
 The full roster of people to be assigned. One name per line.
 
-```txt
+```
 Alice
 Carol
 Bob
@@ -23,7 +23,7 @@ Dave
 
 Where people need to be placed. Indentation defines the hierarchy. Use `size:MIN-MAX` to set capacity constraints.
 
-```txt
+```
 Engineering
   Project Manager  size:1
   Frontend         size:2-4
@@ -36,7 +36,7 @@ Engineering
 
 Express where someone should (or shouldn't) go. Use an optional `# comment` to record the reasoning.
 
-```txt
+```
 Alice strongly prefers Frontend      # part of her growth plan
 Carol prefers Alice                  # Carol wants to work with Alice
 Dave avoids Carol                    # conflict of interest
@@ -44,60 +44,74 @@ Bob requires Backend/Lead
 Alice prefers Lead
 ```
 
-Short structure names that appear more than once (e.g. `Lead` under both Frontend and Backend) can be disambiguated in preferences using partial path syntax: `Frontend/Lead` vs `Backend/Lead`. But can also be used as a target of multiple places. For Example `Alice prefers Lead` will make Alice happy in either `Backend/Lead` or `Frontend/Lead` assignment.
+Short structure names that appear more than once (e.g. `Lead` under both Frontend and Backend) can be disambiguated with partial path syntax: `Frontend/Lead` vs `Backend/Lead`. They can also be used without disambiguation — `Alice prefers Lead` makes Alice happy in *either* `Backend/Lead` or `Frontend/Lead`.
 
 **Verbs and their strength:**
 
-`requires` is stronger than | `strongly prefers`, which is stronger than `prefers`.
-`strongly avoids` is stronger than `avoids`.
+`requires` > `strongly prefers` > `prefers`  
+`strongly avoids` > `avoids`
 
-The target can be an **area** (placement preference) or a **person**.
+The target can be an **area** (placement preference) or a **person** (co-location preference).
 
-## Assignment logic
+## Solver
 
-People are assigned to areas to maximise total happiness — the sum of each person's raw preference satisfaction score.
+The solver maximises total happiness — the sum of each person's raw preference satisfaction score. Capacity (`sizeMax`) is a hard constraint: moves that exceed it are never applied.
 
-Each preference contributes its force when met (positive), or subtracts when violated (negative for avoidance in the same area). Capacity is enforced as a hard constraint — moves that exceed `sizeMax` are never applied.
+### Happiness score
 
-### Solver phases (deterministic — same input always gives the same output)
+Each preference contributes its **force** to a person's score when satisfied:
 
-**Phase 1 — Pseudo-random seed**  
-Free people are placed in a random order into assignable areas using a deterministic seed derived from the input. Same input always produces the same initial placement.
+| Verb | Force |
+| --- | --- |
+| `requires` | +100 |
+| `strongly prefers` | +8 |
+| `prefers` | +6 |
+| `avoids` | −6 |
+| `strongly avoids` | −8 |
 
-**Phase 2 — Preference-guided improvement loop**  
-Each round the solver finds the least happy free person and builds candidate moves *directly from their preferences*:
-
-- **Area preference (+)**: try moving the person to each matching area; try swapping with anyone already there.
-- **Area preference (−)**: if the person is currently in the avoided area, try moving them anywhere else.
-- **Person preference (+)**: try every area for this person (closeness is a gradient); also try bringing the other person closer or swapping.
-- **Person preference (−)**: if sharing an area with someone they avoid, try moving either of them out.
-
-Every candidate is scored by Δ total happiness. The best improving move is applied (even if it moves someone other than the least-happy person — e.g. swapping them out). The loop restarts until no person has any improving move.
+For area preferences, the force is added if the person is in that area or any descendant. For avoidance, it subtracts if the person *is* in the avoided area. For person-to-person preferences (`Alice prefers Bob`), the force is weighted by **closeness** — a gradient from 0 to 1 based on how near they are in the org tree.
 
 ### Co-location closeness
 
-Person-to-person preferences (`Alice prefers Bob`) use a **closeness** score:
-
-```txt
-closeness = 1 / (1 + tree_hops_through_LCA)
+```
+closeness = 1 / (1 + hops through the Lowest Common Ancestor)
 ```
 
-The tooltip shows `~` for partial satisfaction with the LCA node.
+Same area → 1.0. Parent/child → 0.5. Unrelated subtrees → 0.
 
-## Happiness
+### Solver phases (same input always gives the same output)
 
-Each person card shows a satisfaction percentage — the fraction of their preferences (by force magnitude) that are currently satisfied. Hover a card to see which preferences are met (✓) and which are not (✗), and who expressed each preference.
+**Phase 1 — Deterministic initial placement**  
+Free people are placed in a pseudo-random order into assignable areas. The random seed is derived deterministically from the input (FNV-1a hash → LCG), so the same input always produces the same starting point. Capacity is respected at each placement.
+
+**Phase 2 — Preference-guided improvement**  
+Repeat until no improvement is found:
+
+1. Rank free people by individual happiness score (least happy first).
+2. For the least happy person, generate candidate moves **directly from their preferences** — only moves that their prefs motivate:
+   - *Area pref (+)*: move person to each matching area; swap with anyone already there.
+   - *Area pref (−)*: if currently in the avoided area, try moving anywhere else.
+   - *Person pref (+)*: try every area for this person (closeness is a gradient, any move might help); also try bringing the other person here, or swapping.
+   - *Person pref (−)*: if sharing an area with the avoided person, try moving either of them out.
+3. Score every candidate by Δ(total happiness). Apply the best improving move — this may move someone *other* than the least-happy person (e.g. swapping them out of a preferred area).
+4. Restart from step 1. Stop when no person has any improving candidate.
+
+## Happiness display
+
+Each person card shows a satisfaction percentage — the fraction of their preferences (weighted by force magnitude) that are currently met. Hover a card to see which preferences are satisfied (✓) and which are not (✗).
+
+The header shows **Team happiness**: the average satisfaction across all people, updating live as you drag cards around.
 
 ## Drag-and-drop / pins
 
-Cards can be dragged between areas to manually place people. When you start dragging a card, areas that match that person's preferences are highlighted (green = wants to be there, red = avoids, accent border = requires), and badge labels show the verb. Areas where others want to be near that person are also highlighted.
+Cards can be dragged between areas to manually place people. When dragging, areas that match the person's preferences are highlighted (green = wants to be there, red = avoids, blue border = requires), and badge labels show the verb.
 
-Dragging **does not trigger a re-solve** — people stay where they are so you can reason about the change in isolation. When you're happy with manual placements, click **Solve** to re-optimize free people around your pinned choices.
+Dragging **does not trigger a re-solve** — people stay where they are so you can reason about the change in isolation. Click **Solve** to re-optimise free people around your pinned choices.
 
-Pinned placements persist across re-solves and are saved to localStorage. Click `×` on a pinned card to release it (the person stays put until the next Solve).
+Pinned placements persist across re-solves and are saved to localStorage. Click `×` on a pinned card to release it.
 
-**Undo / Redo**: `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) steps through drag, unpin, solve, and clear-pins actions.
+**Undo / Redo**: `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`).
 
 ## Export
 
-**Copy MD** copies the current assignment as a Markdown outline.
+**Copy as Markdown** copies the current assignment as a Markdown outline.
